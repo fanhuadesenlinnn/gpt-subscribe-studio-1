@@ -336,7 +336,8 @@ export function OrderNew({ onRecord }: Props) {
   // 全协议模式的出口：账单国决定，后端会自动把网关地区换成该国家
   const protocolExit = (order?.billing?.country || order?.billing_country || country || "").toUpperCase() || undefined;
   // 全协议模式在 step 1 由 ProtocolPayPanel 自带按钮，底部不再重复一个「确认支付」
-  const protocolStep = payMode === "protocol" && step === 1;
+  // 只有「协议模式 + 已建单」才由面板自带按钮；未建单时仍需要底部「生成结账」按钮
+  const protocolStep = payMode === "protocol" && step === 1 && Boolean(order);
   const primaryAction = step < 2 && !protocolStep ? (
     <Group mt={teamOrder ? "xs" : "md"} justify="flex-end">
       <Button type="submit" size="md" loading={busy}
@@ -347,9 +348,10 @@ export function OrderNew({ onRecord }: Props) {
       </Button>
     </Group>
   ) : null;
-  // 双栏（配置 | 支付面板）只用于浏览器模式的 Team 二次确认；
-  // 全协议模式是单栏居中，否则卡片输入区会被挤到右侧窄栏。
-  const showTeamPayment = teamOrder && step < 2 && payMode === "browser";
+  // 双栏（配置 | 卡片）只在「已经建单」且走浏览器模式时出现。
+  // 未建单必须单栏，否则「生成结账」按钮会被放进右栏而看不到；
+  // 协议模式也是单栏居中，卡片区不会挤到右侧窄栏。
+  const showTeamPayment = teamOrder && step < 2 && payMode === "browser" && Boolean(order);
 
   return (
     <form onSubmit={submit}>
@@ -595,27 +597,16 @@ export function OrderNew({ onRecord }: Props) {
           {!showTeamPayment && primaryAction}
         </Paper>
 
-        {showTeamPayment && (
+        {showTeamPayment && order && (
           <div className="order-payment">
-            {order ? (
-              <TeamPaymentPanel card={teamCard} onCard={setTeamCard}
-                billing={teamBilling} onBilling={setTeamBilling} order={order} busy={busy}
-                onExample={() => {
-                  const example = randomBillingExample(teamBilling);
-                  setTeamBilling(example); setTeamExample(example); setError(null);
-                }}
-                hasExample={Boolean(teamExample)}
-                footer={<>{errorAlert}{primaryAction}</>} />
-            ) : (
-              <Paper withBorder p="lg" radius="md">
-                <Stack gap="sm">
-                  <Text fw={600}>先生成结账，再填卡</Text>
-                  <Text size="sm" c="dimmed">
-                    点左侧「生成 Team 结账链接」后，这里会显示应付金额，然后再填卡片和账单地址。
-                  </Text>
-                </Stack>
-              </Paper>
-            )}
+            <TeamPaymentPanel card={teamCard} onCard={setTeamCard}
+              billing={teamBilling} onBilling={setTeamBilling} order={order} busy={busy}
+              onExample={() => {
+                const example = randomBillingExample(teamBilling);
+                setTeamBilling(example); setTeamExample(example); setError(null);
+              }}
+              hasExample={Boolean(teamExample)}
+              footer={<>{errorAlert}{primaryAction}</>} />
           </div>
         )}
 
