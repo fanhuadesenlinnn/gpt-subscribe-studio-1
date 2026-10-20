@@ -107,8 +107,9 @@ async def solve_grid_request(request):
         raw = base64.b64decode(du)
         im = Image.open(io.BytesIO(raw))
         # 支持裁剪：默认保留中间 3x3 网格区域（去掉题干栏与底部按钮）
-        # 保留顶部题干栏（例题缩略图在那里），只裁掉底部按钮区
-        crop = body.get("grid_crop") or [0.02, 0.0, 0.98, 0.82]
+        # 实测：传整图效果最好。裁剪会丢失上下文，
+        # 导致模型看不清例题缩略图（在题干栏右上角）。
+        crop = body.get("grid_crop") or [0.0, 0.0, 1.0, 1.0]
         cw, ch = im.size
         im2 = im.crop((int(crop[0] * cw), int(crop[1] * ch),
                        int(crop[2] * cw), int(crop[3] * ch)))
@@ -137,12 +138,32 @@ JSON ONLY: {{"tiles":["obj1","obj2","obj3","obj4","obj5","obj6","obj7","obj8","o
     d1 = ask(raw, p1.format(W=W, H=H))
     tiles = (d1 or {}).get("tiles") or []
     if len(tiles) < 9:
-        return JSONResponse({"error": "describe_failed", "raw": d1}, status_code=502)
+        return JSONResponse({"error": "describe_failed", "raw": d1,
+                             "size": [W, H],
+                             "asked": p1.format(W=W, H=H)[:300]}, status_code=502)
 
     # Step 2: 基于描述做判断（不再看图，避免数错格子）
     listing = "\n".join(f"  tile {i+1} = {t}" for i, t in enumerate(tiles))
-    p2 = f'''Look at the TOP of this image. The instruction text and a small
-reference thumbnail (the "example") are shown in the blue prompt bar there.
+    # 先单独裁出右上角缩略图，单独问一次（模型有时会忽略缩略图）
+    example_desc = ""
+    try:
+        tw, th = int(W * 0.16), int(H * 0.16)
+        thumb = im.crop((W - tw - int(W * 0.02), int(H * 0.01),
+                         W - int(W * 0.02), int(H * 0.01) + th))
+        tb = io.BytesIO()
+        thumb.save(tb, format="PNG")
+        t1 = ask(tb.getvalue(),
+                 'What single object does this small picture show? '
+                 'Answer as JSON: {"object":"<one or two words>"}')
+        if t1 and t1.get("object"):
+            example_desc = str(t1["object"])[:60]
+    except Exception:
+        pass
+
+    p2 = f'''Look carefully at the TOP-RIGHT CORNER of this image. There is a small
+square reference thumbnail (the "example" picture) inside the blue prompt bar,
+to the right of the instruction text. Study what that thumbnail depicts.
+{("Hint: the thumbnail appears to show: " + example_desc) if example_desc else ""}
 
 User instruction: "{prompt_text}"
 

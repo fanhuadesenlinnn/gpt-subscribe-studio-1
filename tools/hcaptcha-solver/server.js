@@ -1273,23 +1273,41 @@ class Session {
     const frameEl = await this.page.$('iframe[src*="frame=challenge"]');
     if (!frameEl) return { error: 'no_challenge_iframe' };
     const box = await frameEl.boundingBox();
-    const fr = this.page.frames().find((f) => /challenge/.test(f.url()));
-    if (!fr || !box) return { error: 'no_frame' };
-    const btn = await fr.evaluate(() => {
-      const cands = [...document.querySelectorAll('div[role=button],button,div.button')];
-      for (const d of cands) {
-        const t = (d.innerText || '').trim().toLowerCase();
-        const aria = (d.getAttribute('aria-label') || '').toLowerCase();
-        if (/^(verify|submit|next|continue|check)$/.test(t) || /verify|submit/.test(aria)) {
-          const r = d.getBoundingClientRect();
-          return { x: r.x + r.width / 2, y: r.y + r.height / 2, text: t || aria };
-        }
-      }
-      return null;
-    });
-    if (!btn) return { error: 'no_submit_button' };
+    if (!box) return { error: 'no_box' };
+    // 遍历所有 challenge 相关 frame，找可点击的确认按钮
+    const cands = this.page.frames().filter((f) => /challenge|newassets/.test(f.url()));
+    let btn = null;
+    let seen = [];
+    for (const fr of cands) {
+      try {
+        const r = await fr.evaluate(() => {
+          const out = [];
+          const els = [...document.querySelectorAll(
+            'div[role=button],button,div.button,a[role=button]')];
+          for (const d of els) {
+            const style = getComputedStyle(d);
+            if (style.display === 'none' || style.visibility === 'hidden') continue;
+            const txt = (d.innerText || d.textContent || '').trim();
+            const aria = (d.getAttribute('aria-label') || '').trim();
+            const rect = d.getBoundingClientRect();
+            if (rect.width < 20 || rect.height < 10) continue;
+            out.push({ txt: txt.slice(0, 20), aria: aria.slice(0, 30),
+                       x: rect.x + rect.width / 2, y: rect.y + rect.height / 2,
+                       w: Math.round(rect.width), h: Math.round(rect.height) });
+          }
+          return out;
+        });
+        seen = seen.concat(r.map((x) => x.txt || x.aria));
+        // 匹配确认类按钮（Next / Verify / Submit / Continue / Check）
+        const hit = r.find((x) =>
+          /^(next|verify|submit|continue|check|done)$/i.test((x.txt || '').trim()) ||
+          /verify|submit|next/i.test(x.aria || ''));
+        if (hit) { btn = hit; break; }
+      } catch (_) {}
+    }
+    if (!btn) return { error: 'no_submit_button', seen: seen.slice(0, 12) };
     await this.page.mouse.click(box.x + btn.x, box.y + btn.y, { delay: 50 });
-    return { clicked: btn.text };
+    return { clicked: btn.txt || btn.aria };
   }
 
   /** 读取 __reaPending 里保存的结果（超时后 execute 仍可能在跑）。 */

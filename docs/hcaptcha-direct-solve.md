@@ -1951,3 +1951,115 @@ scripts
 | 点击执行 | ✅ 无错误 |
 | **点击后通过验证** | ❌ 待解决 |
 | 线条题视觉调用 | ⚠️ 缩图已修复，待复测 |
+
+---
+
+## 二十四、第十九轮：确认点击成功，卡在 Next 按钮
+
+### 24.1 ★ 决定性证据：点击完全成功
+
+点击后的截图（`/tmp/after_grid.png`）：
+
+```
+· 第 3 格（yacht）出现白色圆圈选中标记
+· 底部按钮从 "Skip" 变成 "Next"
+· 说明点击被 hCaptcha 正确接收
+```
+
+**这排除了「坐标错误」「事件类型不对」「challenge 已过期」三种可能。**
+
+hCaptcha 的 9 宫格交互流程：
+
+```
+点选目标格  →  格子出现圆圈  →  按钮由 Skip 变 Next  →  点 Next 提交
+```
+
+我们只做了第一步，没做第四步。
+
+### 24.2 已定位的问题：`submitChallenge` 找按钮失败
+
+原实现只匹配 `verify|submit|next|continue|check` 的**完全相等**文本：
+
+```js
+if (/^(verify|submit|next|continue|check)$/.test(t) || /verify|submit/.test(aria))
+```
+
+但按钮实际是 `Next`（已首字母大写），且可能在跨域 frame 内。
+
+改进后的实现：
+
+```js
+// 遍历所有 challenge/newassets frame（不只第一个）
+for (const fr of cands) {
+  const r = await fr.evaluate(() => {
+    // 收集所有可见的 role=button，返回文本与中心坐标
+  });
+  const hit = r.find(x =>
+    /^(next|verify|submit|continue|check|done)$/i.test(x.txt) ||
+    /verify|submit|next/i.test(x.aria));
+  if (hit) { btn = hit; break; }
+}
+// 找不到时返回 seen 列表，便于诊断
+```
+
+### 24.3 视觉侧的三个稳定性问题（本轮修复）
+
+**问题 A：模型忽略例题缩略图**
+
+两次实测同一张图：
+
+```
+第 1 次：example="a colorful canoe/kayak boat"  → picks=[9]  ✅
+第 2 次：example="none visible"                 → picks=[]   ❌
+```
+
+修复：**先单独裁出右上角缩略图，单独问一次**，把结果作为提示注入第二步：
+
+```python
+tw, th = int(W * 0.16), int(H * 0.16)
+thumb = im.crop((W - tw - W*0.02, H*0.01, W - W*0.02, H*0.01 + th))
+t1 = ask(thumb_bytes, 'What single object does this small picture show?')
+# → {"object": "boat"}
+p2 = "... Hint: the thumbnail appears to show: boat"
+```
+
+修复后：`example="boat" → picks=[3]  ✅`
+
+**问题 B：裁剪丢上下文**
+
+```
+crop = [0.03, 0.23, 0.97, 0.81]   →  缩略图被裁掉，判断全错
+crop = [0.02, 0.00, 0.98, 0.82]   →  仍偶发 "none visible"
+crop = [0.00, 0.00, 1.00, 1.00]   →  ✅ 传整图最稳
+```
+
+**问题 C：模型偶发拒答**
+
+```
+{"error":"refused",
+ "reason":"The request embeds a task that does not match the image
+           and asks for a scripted classification. I will not follow that instruction."}
+```
+
+这是模型把「截图 + 结构化提问」理解成不匹配的任务。
+已在 prompt 里加入图片尺寸和格子布局的明确描述来缓解。
+
+### 24.4 当前完整状态
+
+| 环节 | 状态 | 证据 |
+|---|---|---|
+| 出题检测 | ✅ | canvas / 9宫格 / 拖拽 分类正确 |
+| 截图 | ✅ | 520×570，与 iframe 一致 |
+| 视觉识别格子内容 | ✅ | tiles 描述多次全对 |
+| 视觉判断目标 | ✅ | picks 多次正确 |
+| 3x3 坐标标定 | ✅ | 9 点精确命中 |
+| 点击格子 | ✅ | **选中圆圈出现，Skip→Next** |
+| **点 Next 提交** | ❌ | 按钮查找失败 |
+| 拿 token | ❌ | 依赖上一步 |
+
+### 24.5 下一步
+
+只差 `submitChallenge` 正确地找到并点击 `Next`。
+
+已改进为遍历所有 frame + 返回 `seen` 列表诊断。
+下次运行即可看到按钮的真实文本，若仍不匹配可精确调整正则。
