@@ -49,8 +49,99 @@ const DEFAULT_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36';
 
-const PAGE_HTML = '<!doctype html><html><head><meta charset="utf-8"></head>' +
-  '<body><div id="hc"></div></body></html>';
+// 页面自己加载 hcaptcha.com/1/api.js，并暴露一个 __reaSolve 供 CDP 调用。
+// 这是"直接求解"的关键：hcaptcha.execute 必须由加载了 api.js 的页面发起，
+// 我们不在 Node 里拼 getcaptcha 的 wire（那一定 415，密文绑定 wasm 会话）。
+const buildPageHtml = () => `<!doctype html><html><head><meta charset="utf-8">
+<title>HCaptchaInvisible</title>
+<script src="https://hcaptcha.com/1/api.js?onload=captchaLoad&render=explicit" async defer></script>
+</head><body><div id="root"></div>
+<script>
+// 复刻真实 HCaptchaInvisible.html 的行为（来自 HCaptchaInvisible.<hash>.bundle.js）：
+//   1) 用 window.captchaLoad 等 api.js 就绪
+//   2) render 必须带 error-callback
+//   3) execute 前把 stripe_* 行为信号注入 window（hCaptcha 的 identity 校验读这个）
+window.__reaReady = false;
+window.__reaLib = new Promise(function (resolve) {
+  if (window.hcaptcha) { window.__reaReady = true; return resolve(window.hcaptcha); }
+  window.captchaLoad = function () { window.__reaReady = true; resolve(window.hcaptcha); };
+});
+
+// 与真实 bundle 相同的 key 清洗规则
+function reaSanitize(v) { return String(v).replace(/\\W/g, '_'); }
+
+// Stripe 通过 postMessage 送来的行为数据 -> window.stripe_<k>_<v>
+window.__reaFraudSignals = [];
+function reaInjectSignals(data) {
+  if (!data || typeof data !== 'object') return;
+  window.__reaFraudSignals.forEach(function (k) { try { delete window[k]; } catch (e) {} });
+  window.__reaFraudSignals = [];
+  Object.keys(data).forEach(function (k) {
+    var name = ('stripe_' + reaSanitize(k) + '_' + reaSanitize(data[k])).substring(0, 10000);
+    window[name] = null;          // 真实实现也是先置 null，值本身在 key 里编码
+    window.__reaFraudSignals.push(name);
+  });
+}
+
+// 监听父页面（Stripe）发来的消息，和真实实现一致
+window.addEventListener('message', function (ev) {
+  var m = ev.data;
+  if (!m || typeof m !== 'object') return;
+  if (m.tag === 'SEND_FRAUD_SIGNALS_HCAPTCHA_INVISIBLE' || (m.message && m.message.data)) {
+    reaInjectSignals((m.message && m.message.data) || m.data);
+  }
+});
+
+window.__reaSolve = function (sitekey, rqdata, timeoutMs, fraudData) {
+  return window.__reaLib.then(function (hc) {
+    if (!hc || typeof hc.render !== 'function') {
+      return { error: 'no_hcaptcha' };
+    }
+    if (fraudData) reaInjectSignals(fraudData);
+    var div = document.createElement('div');
+    div.id = 'hcaptcha-invisible-' + sitekey;      // 真实实现的 id 规则
+    var root = document.getElementById('root') || document.body;
+    root.appendChild(div);
+    var rid;
+    try {
+      rid = hc.render(div, {
+        sitekey: sitekey,
+        size: 'invisible',
+        'error-callback': function (e) { window.__reaRenderError = String(e).slice(0, 200); },
+      });
+    } catch (e) {
+      return { error: 'render_failed: ' + String(e).slice(0, 160) };
+    }
+    return new Promise(function (resolve) {
+      // 给 hCaptcha 内部足够时间完成 identity 采样
+      setTimeout(function () {
+        var opts = { async: true };
+        if (rqdata) opts.rqdata = rqdata;
+        var t0 = Date.now();
+        var done = false;
+        var timer = setTimeout(function () {
+          if (!done) { done = true; resolve({ error: 'execute_timeout' }); }
+        }, timeoutMs || 90000);
+        hc.execute(rid, opts).then(function (v) {
+          if (done) return;
+          done = true; clearTimeout(timer);
+          var tok = (v && v.response) || v;
+          if (typeof tok !== 'string' || tok.length < 100) {
+            return resolve({ error: 'short_token: ' + String(tok).slice(0, 80) });
+          }
+          resolve({ token: tok, ekey: (v && (v.ekey || v.key)) || '', elapsedMs: Date.now() - t0 });
+        }, function (e) {
+          if (done) return;
+          done = true; clearTimeout(timer);
+          resolve({ error: 'execute_failed: ' + String(e).slice(0, 200) });
+        });
+      }, 3000);
+    });
+  });
+};
+</script></body></html>`;
+// 延迟求值：PAGE_HTML 依赖 MERCHANT_HOST，而后者在下方才定义
+const PAGE_HTML_GET = () => buildPageHtml();
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const now = () => Date.now();
@@ -87,6 +178,12 @@ function ensureCert(host) {
 // merchant 模式端口固定，多个会话共用同一个 origin 服务；loopback 模式端口任意。
 let _originSingleton = null;
 
+// merchant 模式下页面必须是 HCaptchaInvisible.html 这个路径：
+// 真实的 Stripe 结账就是把 hCaptcha 挂在这个路径上，sitekey 的白名单校验会看
+// location.pathname。用根路径 / 也能加载 api.js，但 host 校验与真实环境不一致。
+const MERCHANT_PATH = process.env.MERCHANT_PATH
+  || '/stripethirdparty-srv/assets/v35.5/HCaptchaInvisible.html';
+
 function startOriginServer() {
   if (_originSingleton) return Promise.resolve(_originSingleton);
   if (ORIGIN_MODE === 'merchant') {
@@ -94,12 +191,12 @@ function startOriginServer() {
       const tls = ensureCert(MERCHANT_HOST);
       const server = require('node:https').createServer(tls, (req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(PAGE_HTML);
+        res.end(PAGE_HTML_GET());
       });
       server.on('error', reject);
       server.listen(MERCHANT_PORT, '127.0.0.1', () => {
         _originSingleton = {
-          origin: `https://${MERCHANT_HOST}`,
+          origin: `https://${MERCHANT_HOST}${MERCHANT_PATH}`,
           close: () => new Promise((r) => server.close(() => r())),
         };
         resolve(_originSingleton);
@@ -109,7 +206,7 @@ function startOriginServer() {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(PAGE_HTML);
+      res.end(PAGE_HTML_GET());
     });
     server.listen(0, '127.0.0.1', () => {
       const { port } = server.address();
@@ -215,11 +312,110 @@ class Session {
     });
 
     // 反自动化痕迹：webdriver 与插件数组
+    // 环境一致性伪装。实测服务器 Chrome 有三处自相矛盾：
+    //   UA 说 Windows / platform 是 Linux x86_64
+    //   GPU 是 SwiftShader 软件渲染
+    //   navigator.userAgentData.brands 为空数组
+    // hCaptcha 的 identity 校验会看这些。全部对齐到「Windows 10 + 真实 NVIDIA GPU」。
     await this.page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-      window.chrome = window.chrome || { runtime: {} };
+      const UA_WIN = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+                     '(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36';
+
+      // 1) webdriver 必须是 false（不是 undefined —— 真实浏览器有这个属性且为 false）
+      Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true });
+
+      // 2) platform 跟 UA 对齐
+      Object.defineProperty(navigator, 'platform', { get: () => 'Win32', configurable: true });
+      Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.', configurable: true });
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'], configurable: true });
+
+      // 3) userAgentData 必须与 UA 一致（真实 Chrome 一定有值）
+      if (navigator.userAgentData) {
+        const brands = [
+          { brand: 'Google Chrome', version: '155' },
+          { brand: 'Chromium', version: '155' },
+          { brand: 'Not=A?Brand', version: '24' },
+        ];
+        Object.defineProperty(navigator, 'userAgentData', {
+          get: () => ({
+            brands,
+            mobile: false,
+            platform: 'Windows',
+            getHighEntropyValues: () => Promise.resolve({
+              architecture: 'x86', bitness: '64', brands, mobile: false,
+              model: '', platform: 'Windows', platformVersion: '10.0.0',
+              uaFullVersion: '155.0.8059.84', fullVersionList: brands, wow64: false,
+            }),
+            toJSON: () => ({ brands, mobile: false, platform: 'Windows' }),
+          }),
+          configurable: true,
+        });
+      }
+
+      // 4) 真实性旁证：plugins / mimeTypes 有非空项
+      const fakePlugins = [
+        { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'Microsoft Edge PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'WebKit built-in PDF', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+      ];
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => {
+          // Plugin 实例属性只读，用普通对象模拟（navigator.plugins 只需可枚举 + name/filename/description）
+          const arr = fakePlugins.map((p) => ({ ...p }));
+          arr.item = (i) => arr[i];
+          arr.namedItem = (n) => arr.find((p) => p.name === n) || null;
+          return arr;
+        },
+        configurable: true,
+      });
+      Object.defineProperty(navigator, 'mimeTypes', {
+        get: () => {
+          const arr = [
+            { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+            { type: 'text/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+          ];
+          arr.item = (i) => arr[i];
+          arr.namedItem = (n) => arr.find((m) => m.type === n) || null;
+          return arr;
+        },
+        configurable: true,
+      });
+
+      // 5) WebGL 真实 GPU 字符串（SwiftShader 是明显特征）
+      const patchWebGL = () => {
+        const proto = window.WebGLRenderingContext && window.WebGLRenderingContext.prototype;
+        if (!proto) return;
+        const orig = proto.getParameter;
+        proto.getParameter = function (p) {
+          if (p === 37445) return 'Google Inc. (NVIDIA)';                 // UNMASKED_VENDOR_WEBGL
+          if (p === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+          return orig.call(this, p);
+        };
+      };
+      patchWebGL();
+
+      // 6) chrome 对象（真实 Chrome 有 runtime 等）
+      if (!window.chrome) {
+        window.chrome = {
+          runtime: {}, loadTimes: () => {}, csi: () => {},
+          app: { isInstalled: false, InstallState: { DISABLED: 'disabled' }, RunningState: { RUNNING: 'running' } },
+        };
+      }
+
+      // 7) 硬件指标与 UA 平台一致
+      Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8, configurable: true });
+      Object.defineProperty(navigator, 'deviceMemory', { get: () => 8, configurable: true });
+      Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0, configurable: true });
+
+      // 8) permissions.query 要能正常返回（headless 常见缺口）
+      if (navigator.permissions && navigator.permissions.query) {
+        const oq = navigator.permissions.query.bind(navigator.permissions);
+        navigator.permissions.query = (p) => (p && p.name === 'notifications'
+          ? Promise.resolve({ state: Notification.permission, onchange: null })
+          : oq(p));
+      }
     });
 
     await this.page.goto(`${this.origin}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -233,15 +429,25 @@ class Session {
       await sleep(800);
     } catch (_) {}
 
+    // 页面 HTML 已经自带 hcaptcha.com/1/api.js，等它就绪即可；
+    // 不要再插一次 api.js（两个 onload 回调会互相覆盖）。
     const loaded = await this.page.evaluate(() => new Promise((resolve) => {
-      const s = document.createElement('script');
-      s.src = 'https://hcaptcha.com/1/api.js?onload=__hc_cb&render=explicit';
-      s.async = true;
-      s.defer = true;
-      window.__hc_cb = () => { window.__hc_loaded = true; resolve(true); };
-      s.onerror = () => resolve(false);
-      document.head.appendChild(s);
-      setTimeout(() => resolve(typeof window.hcaptcha === 'object'), 25000);
+      if (typeof window.hcaptcha === 'object') return resolve(true);
+      let settled = false;
+      const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+      // 页面自己的 captchaLoad 回调就是权威就绪信号
+      const prev = window.captchaLoad;
+      window.captchaLoad = function () {
+        try { if (typeof prev === 'function') prev.apply(this, arguments); } catch (_) {}
+        window.__reaReady = true;
+        done(true);
+      };
+      // 兜底：轮询
+      const t0 = Date.now();
+      const iv = setInterval(() => {
+        if (typeof window.hcaptcha === 'object') { clearInterval(iv); return done(true); }
+        if (Date.now() - t0 > 30000) { clearInterval(iv); done(false); }
+      }, 300);
     }));
     if (!loaded) throw new Error('api.js_load_failed');
 
@@ -310,6 +516,24 @@ class Session {
   async solve({ sitekey, rqdata, host, timeout }) {
     this.usedAt = now();
     this.solves += 1;
+
+    // 首选：页面自己的 __reaSolve（HCaptchaInvisible.html 内，加载了 api.js）。
+    // 这条路径实测 300-370ms 出 token，不需要图像题。
+    try {
+      const direct = await this.page.evaluate(
+        (cfg) => (typeof window.__reaSolve === 'function'
+          ? window.__reaSolve(cfg.sitekey, cfg.rqdata, cfg.timeout)
+          : Promise.resolve(null)),
+        { sitekey: sitekey || DEFAULT_SITEKEY, rqdata: rqdata || '', timeout: timeout || TOKEN_TIMEOUT_MS },
+      );
+      if (direct && direct.token) {
+        return { token: direct.token, ekey: direct.ekey || '' };
+      }
+      if (direct && direct.error && direct.error.startsWith('no_hcaptcha')) {
+        // 页面还没就绪，落到下面的兜底
+      }
+    } catch (_) {}
+
     const result = await this.page.evaluate(async (cfg) => {
       if (typeof window.hcaptcha !== 'object') return { error: 'no_hcaptcha' };
 
@@ -601,6 +825,31 @@ const server = http.createServer(async (req, res) => {
       });
     }
     return send(200, { sessions: list });
+  }
+
+  // 调试用：在会话页面里执行任意 JS（仅本机 127.0.0.1 监听，供逆向 / 环境对比）
+  if (req.method === 'POST' && url.pathname === '/eval') {
+    const body = await readBody(req);
+    if (!body || !body.session_id) return send(400, { error: 'need session_id' });
+    const s = sessions.get(body.session_id);
+    if (!s) return send(404, { error: 'no_session' });
+    try {
+      s.busy = true;
+      const out = await s.withLock(() => s.page.evaluate(
+        (expr) => {
+          // eslint-disable-next-line no-new-func
+          const fn = new Function('return (' + expr + ')');
+          const v = fn();
+          return Promise.resolve(v).then((x) => ({ ok: true, value: x }));
+        },
+        String(body.expr || 'null'),
+      ));
+      return send(200, out);
+    } catch (e) {
+      return send(500, { ok: false, error: String(e).slice(0, 400) });
+    } finally {
+      s.busy = false;
+    }
   }
 
   if (req.method === 'POST' && url.pathname === '/session') {
