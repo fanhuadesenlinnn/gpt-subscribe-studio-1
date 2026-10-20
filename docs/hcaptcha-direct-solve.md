@@ -790,3 +790,95 @@ hCaptcha 的题目图 = 背景图 + 线条叠加层。如果能拿到**不含线
 | 自动找 Verify 提交 | ✅ |
 | **线条长度判断** | ❌ 精度不足 |
 | **9 宫格物体识别** | ❌ 需视觉理解 |
+
+---
+
+## 十四、第九轮：找到「iframe 累积」这个新变量
+
+### 14.1 重大发现：同一个页面连续求解会崩塌
+
+本机 AB 页面（`hcaptcha-test.local`）连续 8 次求解，**未清理任何 iframe**：
+
+```
+#1 OK 3794 316ms
+#2 OK 3804 287ms
+#3 OK 3814 370ms
+#4 FAIL execute_timeout
+...
+成功 4 失败 4       页面已累积 16 个 iframe
+```
+
+对比之前「每次删掉旧 widget」的测试：
+
+```
+#1-#8 全部 OK，300-680ms        成功 8/8
+```
+
+**结论：hCaptcha widget 实例累积是成功率崩塌的直接原因。**
+每次 render 都会新建一对 iframe（checkbox-invisible + challenge），
+累积到一定数量后新实例无法完成握手，直接超时。
+
+### 14.2 这解释了服务器为什么 0 成功
+
+服务器 solver 的会话复用策略：
+
+```
+/session 建立一个 browser + page
+/solve   调用 __reaSolve → render → execute
+```
+
+`__reaSolve` 里虽然有清理逻辑（`hc.remove` + 删 iframe），但只在
+**求解开始前**清理一次。如果 session 被复用于多次 solve，
+或者一次 solve 内部触发多轮重试，iframe 就会堆积。
+
+而且 9 宫格 skip 会触发新一轮 render，同样累积。
+
+### 14.3 三个新 IP、每个只请求一次，仍然全失败
+
+```
+0 token=0 err=execute_timeout
+1 token=0 err=execute_timeout
+2 token=0 err=execute_timeout
+```
+
+用 US 代理换 3 个不同 sid，每个都是**全新会话 + 全新 page**，
+仍然 3/3 失败。**所以 iframe 累积不是服务器失败的唯一原因。**
+
+### 14.4 累计排除的假设（九轮）
+
+| # | 假设 | 结果 |
+|---|---|---|
+| A | swiftshader 渲染特征 | ❌ 改 llvmpipe 仍失败 |
+| B | DOM 富度 | ❌ 本机 4444B 也成功 |
+| C | 鼠标事件模拟 | ❌ 本机不模拟也成功 |
+| D | 出口 IP 信誉 | ❌ 6 家 ISP 全失败，本机腾讯云成功 |
+| E | render 缺 host 参数 | ❌ 已补，仍失败 |
+| F | checksiteconfig pass | ❌ 两侧完全相同（f=0,s=4,c=1000） |
+| G | Chrome 版本 | ❌ 仅末位差 1 |
+| H | userAgentData 是 JS 伪造 | ❌ 改 CDP 原生仍失败 |
+| I | iframe/widget 累积 | ⚠️ 是真因之一，但不是全部 |
+| J | 累积计数器（IP 被计数） | ❌ 新 IP 首次请求也失败 |
+
+### 14.5 两边的客观对比
+
+```
+本机   <PROXY_IP>  Tencent Cloud JP   hosting=true   macOS 14
+服务器 <SERVER_IP>   Psychz Networks    hosting=true   Ubuntu 24.04
+```
+
+两边都是机房 IP，唯一系统性差异是**操作系统**。
+macOS vs Linux 会渗透到 hCaptcha 能探测但难以枚举的层：
+字体 metrics、Canvas 文字渲染像素、AudioContext 指纹、
+时钟抖动、TCP/IP 栈指纹、Chrome 自身的 TLS 扩展顺序。
+
+### 14.6 本轮的可用结论
+
+**必须严格遵守的工程约束**：
+
+```
+每次求解前：必须完全销毁旧 widget（hc.remove + 删除全部 hcaptcha iframe）
+连续求解：  每 N 次（实测 3-4 次）后重建 page 或浏览器
+批量场景：  单 page 求解上限 3 次，超过则重启
+```
+
+这条已可落地——即使服务器仍出题，至少能保证「不会因为累积而崩塌」。
