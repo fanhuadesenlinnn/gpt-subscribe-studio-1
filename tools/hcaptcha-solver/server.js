@@ -1203,6 +1203,30 @@ class Session {
     return { picked, canvas, iframe: { x: Math.round(box.x), y: Math.round(box.y) } };
   }
 
+  /**
+   * 按 challenge iframe 内的归一化坐标点击（0..1）。
+   * 用于 9 宫格题：格子不是 button 元素、也没有 canvas 时按比例定位。
+   */
+  async clickInFrame(coords) {
+    const frameEl = await this.page.$('iframe[src*="frame=challenge"]');
+    if (!frameEl) return { error: 'no_challenge_iframe' };
+    const box = await frameEl.boundingBox();
+    if (!box) return { error: 'no_iframe_box' };
+    const picked = [];
+    for (const [nx, ny] of coords) {
+      const ax = box.x + nx * box.width;
+      const ay = box.y + ny * box.height;
+      await this.page.mouse.move(ax + (Math.random() - 0.5) * 3,
+                                 ay + (Math.random() - 0.5) * 3);
+      await sleep(70 + Math.random() * 90);
+      await this.page.mouse.click(ax, ay, { delay: 40 + Math.random() * 40 });
+      picked.push({ nx, ny, ax: Math.round(ax), ay: Math.round(ay) });
+      await sleep(350 + Math.random() * 400);
+    }
+    return { picked, iframe: { x: Math.round(box.x), y: Math.round(box.y),
+                               w: Math.round(box.width), h: Math.round(box.height) } };
+  }
+
   /** 按格子索引点击（0 基），点完提交。 */
   async answerChallenge(indices) {
     const frameEl = await this.page.$('iframe[src*="frame=challenge"]');
@@ -1700,6 +1724,170 @@ const server = http.createServer(async (req, res) => {
         return list;
       });
       return send(200, { frames: out });
+    } catch (e) {
+      return send(500, { error: String(e).slice(0, 300) });
+    } finally {
+      s.busy = false;
+    }
+  }
+
+  // 视觉答题：出题 → 裁剪 canvas → 交给外部视觉服务 → 点击 → 等 token
+  // { session_id, sitekey, rqdata, host, vision_url, timeout_ms, wait_ms }
+  if (req.method === 'POST' && url.pathname === '/vision-answer') {
+    const body = await readBody(req);
+    const s = sessions.get((body && body.session_id) || '');
+    if (!s) return send(404, { error: 'no_session' });
+    const visionUrl = (body && body.vision_url) || 'http://127.0.0.1:8300/solve';
+    try {
+      s.busy = true;
+      const out = await s.withLock(async () => {
+        const t0 = now();
+        // 1) 出题
+        const solved = await s.solve({
+          sitekey: body.sitekey || DEFAULT_SITEKEY,
+          rqdata: body.rqdata || '',
+          host: body.host || DEFAULT_HOST,
+          timeout: Number(body.timeout_ms || 40000),
+          inject: false,
+        });
+        if (solved.token) return { phase: 'direct', token: solved.token, tokenLen: solved.token.length };
+        const ch = solved.challenge || await s.captureChallenge().catch(() => null);
+        const prompt = (ch && ch.prompt) || '';
+        const cvs = (ch && ch.canvases) || [];
+        const cells = (ch && ch.cells) || [];
+        // 题干含 line/curve/shorter 才走线条题；其余一律按 9 宫格处理
+        // （格子未必是 button 元素，captureChallenge 拿不到，所以不能靠格子数量判断）
+        const isLinePrompt = /lines?\b|curve|shorter|longer/i.test(prompt);
+
+        const gridCells = cells.filter((c) => c.w >= 80 && c.h >= 80 &&
+          Math.abs(c.w - c.h) < 30 && !/skip|about|refresh|english/i.test(c.aria || ''));
+
+        // ── 9 宫格题：截图后交给视觉服务按索引作答 ──
+        if (!isLinePrompt) {
+          let shot = null;
+          try {
+            const el = await s.page.$('iframe[src*="frame=challenge"]');
+            if (el) {
+              const bx = await el.boundingBox();
+              if (bx) {
+                shot = await s.page.screenshot({
+                  clip: { x: Math.max(0, bx.x), y: Math.max(0, bx.y),
+                          width: Math.min(bx.width, 2000), height: Math.min(bx.height, 2000) },
+                  encoding: 'base64',
+                });
+              }
+            }
+          } catch (_) {}
+          if (!shot) return { phase: 'grid', error: 'no_shot', prompt, cells: gridCells };
+          let gv = null;
+          try {
+            const vr = await fetch(visionUrl.replace('/solve', '/solve-grid'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ png: 'data:image/png;base64,' + shot,
+                                     prompt, cells: gridCells }),
+            });
+            gv = await vr.json();
+          } catch (e) {
+            console.log('   [grid] vision call failed:', String(e).slice(0, 200));
+            return { phase: 'grid_vision_fail', error: String(e).slice(0, 200), prompt,
+                     visionUrl: visionUrl.replace('/solve', '/solve-grid'),
+                     shotLen: shot.length };
+          }
+          console.log('   [grid] vision →', JSON.stringify(gv).slice(0, 200));
+          const idx = (gv && gv.indices) || [];
+          if (!idx.length) return { phase: 'grid_no_picks', prompt, gv };
+          // 按 3x3 阅读顺序换算成 iframe 内的归一化坐标
+          // 网格区域约占截图下方 80%（题干栏在上方）
+          let ans;
+          if (gridCells.length >= 4) {
+            ans = await s.answerChallenge(idx);
+          } else {
+            // 无 aria 时按几何布局推算：3x3 网格在截图下部
+            const coords = idx.map((k) => {
+              const col = k % 3, row = Math.floor(k / 3);
+              return [(col + 0.5) / 3, 0.42 + row * 0.19];
+            });
+            ans = await s.clickInFrame(coords);
+          }
+          const result = { phase: 'grid_answered', prompt, indices: idx, ans, gv };
+          if (ans && ans.error) return result;
+          await sleep(400);
+          result.submit = await s.submitChallenge();
+          const until = now() + Number(body.wait_ms || 60000);
+          while (now() < until) {
+            await sleep(1000);
+            const pend = await s.readPendingToken();
+            if (pend && pend.token) { result.token = pend.token; result.tokenLen = pend.token.length; break; }
+            const got = await s.readToken();
+            if (got && got.token) { result.token = got.token; result.tokenLen = got.token.length; break; }
+          }
+          result.elapsedMs = now() - t0;
+          return result;
+        }
+
+        // ── 线条题：canvas → 视觉服务 ──
+        const main = cvs.filter((c) => (c.dataUrl || '').length > 500)
+          .sort((a, b) => (b.w * b.h) - (a.w * a.h))[0];
+        if (!main) {
+          return { phase: 'challenge', error: 'no_canvas', prompt,
+                   cells, elapsedMs: now() - t0 };
+        }
+        // 2) 交给视觉服务
+        // 压缩：canvas dataURL 可能 1.4MB，直接用 fetch 会失败。
+        // 在页面内用 OffscreenCanvas 缩到宽 600 再传。
+        let pngData = main.dataUrl;
+        try {
+          const shrunk = await s.page.evaluate(async (cfg) => {
+            const im = new Image();
+            await new Promise((ok, bad) => { im.onload = ok; im.onerror = bad; im.src = cfg.du; });
+            const scale = Math.min(1, 600 / im.width);
+            const c = document.createElement('canvas');
+            c.width = Math.round(im.width * scale);
+            c.height = Math.round(im.height * scale);
+            c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+            return c.toDataURL('image/png');
+          }, { du: main.dataUrl });
+          if (shrunk && shrunk.length > 1000) pngData = shrunk;
+        } catch (_) {}
+        let vis = null;
+        try {
+          const vr = await fetch(visionUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ png: pngData, prompt,
+                                   width: main.w, height: main.h }),
+          });
+          vis = await vr.json();
+        } catch (e) {
+          console.log('   [line] vision call failed:', String(e).slice(0, 200));
+          return { phase: 'vision_fail', error: String(e).slice(0, 200), prompt,
+                   visionUrl, dataLen: (main.dataUrl || '').length };
+        }
+        console.log('   [line] vision →', JSON.stringify(vis).slice(0, 200));
+        const coords = (vis && vis.norm) || [];
+        if (coords.length < 2) {
+          return { phase: 'vision_no_coords', prompt, vis };
+        }
+        // 3) 点击
+        const ans = await s.answerChallengeAt(coords);
+        const result = { phase: 'answered', prompt, coords, ans, vis };
+        if (ans && ans.error) return result;
+        // 4) 提交并等 token
+        await sleep(300);
+        result.submit = await s.submitChallenge();
+        const until = now() + Number(body.wait_ms || 60000);
+        while (now() < until) {
+          await sleep(1000);
+          const pend = await s.readPendingToken();
+          if (pend && pend.token) { result.token = pend.token; result.tokenLen = pend.token.length; break; }
+          const got = await s.readToken();
+          if (got && got.token) { result.token = got.token; result.tokenLen = got.token.length; break; }
+        }
+        result.elapsedMs = now() - t0;
+        return result;
+      });
+      return send(200, { ok: true, session_id: s.id, ...out });
     } catch (e) {
       return send(500, { error: String(e).slice(0, 300) });
     } finally {
