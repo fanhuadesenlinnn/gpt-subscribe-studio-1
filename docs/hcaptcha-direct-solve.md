@@ -2063,3 +2063,101 @@ crop = [0.00, 0.00, 1.00, 1.00]   →  ✅ 传整图最稳
 
 已改进为遍历所有 frame + 返回 `seen` 列表诊断。
 下次运行即可看到按钮的真实文本，若仍不匹配可精确调整正则。
+
+---
+
+## 二十五、第二十轮：Next 按钮已通，卡在答案通过率
+
+### 25.1 关键突破：Next 按钮点击成功
+
+```
+phase: answered       submit: {"clicked": "Next"}     ← 线条题
+phase: grid_answered  submit: {"clicked": "Next"}     ← 9 宫格
+```
+
+`submitChallenge` 的改进生效了，能正确找到并点击 `Next`。
+
+### 25.2 但点完 Next 后页面被重建
+
+点击 Next 之后立刻抓 frame 状态：
+
+```
+frame: text='Please try again. ⚠️ Skip EN'   btns=5   canv=0
+截图:   全白（1943 字节）
+```
+
+`seen` 列表变回 `["Skip", "EN", "About hCaptcha & Accessibility", ...]`，
+按钮从 `Next` 退回 `Skip`，challenge 页面被销毁重建。
+
+**这说明答案被判定为错误，hCaptcha 重新发题。**
+
+### 25.3 完整机制已探明
+
+```
+出题 → 点目标格（圆圈出现，Skip→Next）→ 点 Next
+  ├─ 答案正确 → 出 token（或进入下一页）
+  └─ 答案错误 → challenge 销毁，重新出题（回到 Skip 状态）
+```
+
+所以流程本身已经全通，**唯一的问题是答案准确率不足**。
+
+### 25.4 发现的准确率隐患：格子有时是空的
+
+模型返回的 tiles 里出现：
+
+```
+["blank","car","tree","bicycle","bicycle","yacht","buildings","motorcycle","blank"]
+["fox","fox outline","empty","horse","empty","sitting animal outline","empty","rabbit outline","empty"]
+```
+
+`"blank"` / `"empty"` 说明：
+1. 部分格子的图片还没加载完就截图了
+2. 或该处本来就没有格子（题目是「拖拽」而非「9 宫格」）
+
+**这会导致模型对空白的格子做错误判断。**
+
+### 25.5 当前准确率实测
+
+```
+#1 grid_answered indices=[1,3,4,7]  tiles 含 2 个 blank   → 点 Next 后重出题
+#2 grid_answered indices=[2,4,6,8]  tiles 含 4 个 empty   → 点 Next 后重出题
+#3 answered      线条题                                   → 点 Next 后重出题
+```
+
+视觉判断本身看起来合理（例如 `example=bicycle → picks=[2,4,5,8]` 选中所有自行车），
+但 hCaptcha 判定不通过。
+
+### 25.6 可能的三个原因
+
+**A. 截图时机太早，图片未加载完**
+
+`captureChallenge()` 在 `execute` 超时后立刻截图，
+此时格子图片可能还在加载（`blank`/`empty` 就是证据）。
+
+**B. 多选题的判定比想象的严格**
+
+「Select items that go in the same room」这类题，
+模型选了 4 个，实际可能只有 3 个——多选一个就算错。
+
+**C. 需要处理分页**
+
+hCaptcha 的 9 宫格可能有多页（`page 1 of 2` 出现在 Skip 的 aria 里）。
+
+### 25.7 本轮结论
+
+**流程 100% 打通，卡在答案准确率。**
+
+| 环节 | 状态 | 证据 |
+|---|---|---|
+| 出题 → 截图 → 视觉判断 → 点格子 → 点 Next | ✅ **全流程可执行** | `submit: {"clicked": "Next"}` |
+| 答案被接受 | ❌ | 点 Next 后 challenge 重建 |
+
+这已经从「不知道怎么做」变成「知道怎么做但不够准」，
+是性质不同的两个阶段。
+
+### 25.8 下一步优先级
+
+1. **等待图片加载完再截图**（最可能有效）
+   - `captureChallenge` 前先轮询检测所有格子图片 `complete === true`
+2. **支持多页题目**（`page 1 of 2`）
+3. **调低选取阈值**，宁可少选也不错选
