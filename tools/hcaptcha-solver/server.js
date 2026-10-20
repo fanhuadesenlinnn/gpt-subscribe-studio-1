@@ -99,8 +99,25 @@ window.__reaSolve = function (sitekey, rqdata, timeoutMs, fraudData) {
       return { error: 'no_hcaptcha' };
     }
     if (fraudData) reaInjectSignals(fraudData);
+    // 每次求解前清掉上一次的 widget 容器与残留 iframe。
+    // 实测：不清会让 hCaptcha 复用被污染的实例，下一轮直接出题或超时。
+    try {
+      var prevWidgets = window.__reaWidgets || [];
+      for (var wi = 0; wi < prevWidgets.length; wi++) {
+        try { hc.remove(prevWidgets[wi]); } catch (e) {}
+      }
+      window.__reaWidgets = [];
+      var stray = document.querySelectorAll('iframe[src*="newassets.hcaptcha.com"]');
+      for (var si = 0; si < stray.length; si++) {
+        try { stray[si].parentNode && stray[si].parentNode.removeChild(stray[si]); } catch (e) {}
+      }
+      var olds = document.querySelectorAll('[id^="hcaptcha-invisible-"]');
+      for (var oi = 0; oi < olds.length; oi++) {
+        try { olds[oi].parentNode && olds[oi].parentNode.removeChild(olds[oi]); } catch (e) {}
+      }
+    } catch (e) {}
     var div = document.createElement('div');
-    div.id = 'hcaptcha-invisible-' + sitekey;      // 真实实现的 id 规则
+    div.id = 'hcaptcha-invisible-' + sitekey + '-' + Math.random().toString(36).slice(2, 8);
     var root = document.getElementById('root') || document.body;
     root.appendChild(div);
     var rid;
@@ -114,6 +131,10 @@ window.__reaSolve = function (sitekey, rqdata, timeoutMs, fraudData) {
     } catch (e) {
       return { error: 'render_failed: ' + String(e).slice(0, 160) };
     }
+    try {
+      window.__reaWidgets = window.__reaWidgets || [];
+      window.__reaWidgets.push(rid);
+    } catch (e) {}
     return new Promise(function (resolve) {
       // 给 hCaptcha 内部足够时间完成 identity 采样
       setTimeout(function () {
@@ -122,7 +143,20 @@ window.__reaSolve = function (sitekey, rqdata, timeoutMs, fraudData) {
         var t0 = Date.now();
         var done = false;
         var timer = setTimeout(function () {
-          if (!done) { done = true; resolve({ error: 'execute_timeout' }); }
+          if (!done) {
+            done = true;
+            // 超时时把现场状态一起带回去，便于定位卡在哪一步
+            var frames = [];
+            try {
+              var fs = document.querySelectorAll('iframe');
+              for (var i = 0; i < fs.length; i++) {
+                var m = (fs[i].src || '').match(/frame=([a-z-]+)/);
+                frames.push(m ? m[1] : 'main');
+              }
+            } catch (e) {}
+            resolve({ error: 'execute_timeout', elapsedMs: Date.now() - t0,
+                      iframes: frames, bodyLen: document.body.innerHTML.length });
+          }
         }, timeoutMs || 90000);
         hc.execute(rid, opts).then(function (v) {
           if (done) return;
@@ -553,8 +587,15 @@ class Session {
       if (direct && direct.token) {
         return { token: direct.token, ekey: direct.ekey || '' };
       }
-      if (direct && direct.error && direct.error.startsWith('no_hcaptcha')) {
-        // 页面还没就绪，落到下面的兜底
+      // 有结果但不是 token：记录原因后立刻返回，不再跑兜底。
+      // 兜底会让总耗时翻倍（90+90=180s）并掩盖 __reaSolve 的真实失败原因。
+      if (direct && direct.error) {
+        const ch = await this.captureChallenge().catch(() => null);
+        return { error: direct.error, challenge: ch || undefined };
+      }
+      if (direct && direct.timeout) {
+        const ch = await this.captureChallenge().catch(() => null);
+        return { error: 'execute_timeout', challenge: ch || undefined };
       }
     } catch (_) {}
 
@@ -628,7 +669,12 @@ class Session {
       const imgs = [...document.querySelectorAll('img')]
         .map((i) => i.src)
         .filter((s) => /imgs\d*\.hcaptcha\.com/.test(s));
-      const canvases = [...document.querySelectorAll('canvas')].map((c) => c.toDataURL().slice(0, 64) + '...');
+      // 完整导出 canvas（题目可能是 canvas 渲染的线条/图片）
+      const canvases = [...document.querySelectorAll('canvas')].map((c, i) => {
+        try {
+          return { i, w: c.width, h: c.height, dataUrl: c.toDataURL('image/png') };
+        } catch (e) { return { i, err: String(e).slice(0, 60) }; }
+      });
       const bgs = [...document.querySelectorAll('div')]
         .map((d) => getComputedStyle(d).backgroundImage)
         .filter((v) => v && v.includes('hcaptcha.com'))
@@ -648,7 +694,7 @@ class Session {
           h: Math.round(r.height),
         };
       }).filter((c) => c.w > 20 && c.h > 20);
-      return { prompt, header, imgs: [...imgs, ...bgs], canvases: canvases.length, cells, frameUrl: location.href.slice(0, 160) };
+      return { prompt, header, imgs: [...imgs, ...bgs], canvases, cells, frameUrl: location.href.slice(0, 160) };
     }).catch(() => null);
   }
 

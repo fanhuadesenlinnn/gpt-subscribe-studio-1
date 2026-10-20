@@ -477,3 +477,135 @@ await cdp.send('Emulation.setUserAgentOverride', {
 
 **八轮排除后，服务器侧的所有可观测差异都已对齐到与本机一致，
 但 `c7faac4c` 仍然 187s 超时。本机同一页面、同一 sitekey、同一 IP 段，369ms 成功。**
+
+---
+
+## 十一、第六轮：找到「187s = 90+90」的双重超时，并首次拿到真实题目
+
+### 11.1 关键修复：兜底路径掩盖了真实错误
+
+原 `solve()` 逻辑：
+
+```js
+const direct = await page.evaluate(cfg => window.__reaSolve(...));  // 90s 超时
+if (direct && direct.token) return {...};
+// 没 token 就静默落到下面，再跑一次 90s
+const result = await page.evaluate(/* 旧的兜底实现 */);            // 又 90s
+```
+
+**187s ≈ 90 + 90。** 兜底路径不仅翻倍耗时，还会重复 render 污染状态，
+把 `__reaSolve` 的真实失败原因掩盖掉。
+
+修复：`direct` 有 `error`/`timeout` 就立刻返回，不再跑兜底。
+
+### 11.2 首次拿到真实题目
+
+修复后服务器第一次返回了有效 challenge：
+
+```
+prompt : "Please click on the TWO lines that are shorter"
+header : "Please click on the TWO lines that are shorter / Please try again. ⚠️"
+canvases: 1  (1000×940, dataURL 1.4MB)
+imgs   : 0
+cells  : 4（全是按钮：Skip / About / Refresh / 无名）
+```
+
+**结论：服务器确实在出真实图像题，而且是 canvas 渲染的。**
+
+三类题目轮换出现：
+
+| 题面 | 类型 |
+|---|---|
+| `Please click on the TWO lines that are shorter` | 线条长短判断 |
+| `Find all things with on and off states` | 开关状态识别 |
+| 空 prompt + 只有按钮 | 空壳复核 |
+
+### 11.3 canvas 题目已能完整导出
+
+`captureChallenge()` 现在返回完整 `canvases: [{i, w, h, dataUrl}]`，
+可落盘为 PNG 供离线分析。
+
+### 11.4 本机也不是 100% 成功
+
+连续 5 次同一会话：
+
+```
+#1 OK 3778 612ms
+#2 OK 3799 289ms
+#3 OK 3783 358ms
+#4 OK 3783 320ms
+#5 FAIL execute_timeout 45002ms    ← 本机也出了
+```
+
+**之前判定「本机 100% 成功」是因为每次都重启 Chrome，状态干净。**
+
+清理 widget 后重测：
+
+```
+#1-#8 全部 OK，300-680ms          成功 8/8
+```
+
+所以规律是：**hCaptcha 实例被污染后开始出题；清理后恢复。**
+这一条已写进 `__reaSolve`（求解前 `hc.remove` 旧 widget + 清残留 iframe）。
+
+### 11.5 服务器仍然每次出题
+
+清理 widget 后连续 3 次：
+
+```
+#1 93.9s  prompt="Find all things with on and off states"
+#2 94.0s  prompt="Please click on the TWO lines that are shorter"
+#3 93.7s  prompt="Find all things with on and off states"
+```
+
+### 11.6 host 参数不是决定因素
+
+在服务器页面内用三个不同 host 渲染同一 sitekey：
+
+```
+host="hcaptcha-test.local"  → 20027ms timeout
+host="b.stripecdn.com"      → 20036ms timeout
+host=(none)                 → 20038ms timeout
+```
+
+三者全失败，host 无关。
+
+### 11.7 图像题自动求解的尝试（未完成）
+
+已实现两版检测算法（`solve_lines.py` / `solve_lines2.py`）：
+
+- v1（亮度+低饱和）：把背景反光误判为线，检出 13 个碎片，选错
+- v2（V>165 & S<95 & 细长）：检出 5 条，**数量正确**，
+  但 bbox 含页面白边，中心点偏移
+
+按颜色（R/B 高于 G）筛选可精确定位两条粗粉线（掩码干净），
+但漏掉 3 条细白线。**线条题需要更可靠的检测**。
+
+题目图样本：`/tmp/chal_canvas_0.png`（已落盘，可离线迭代算法）
+
+### 11.8 当前状态
+
+```
+本机（清理 widget 后）  c7faac4c ✅ 8/8，300-680ms
+服务器（同样清理）      c7faac4c ❌ 3/3，每次 image challenge
+```
+
+服务器每次必出图像题，本机清理后不出。差异仍未定位到单一变量。
+
+### 11.9 下一步优先级调整
+
+鉴于：
+1. 服务器 100% 出图像题，且题目类型会轮换（线条 / 开关状态 / 空壳）
+2. 图像题用传统 CV 难以稳定解决（已试两版）
+3. 本机清理 widget 后能稳定 8/8
+
+**建议优先做「图像题自动作答」而不是继续找环境差异**，因为：
+- 环境差异已排查 8 轮未果
+- 图像题是明确可解的技术问题，只需接一个视觉模型
+- 一旦能答题，服务器出题不再是障碍
+
+**具体方案**：
+1. `captureChallenge()` 已能导出 canvas PNG
+2. 把 canvas 交给视觉模型（multimodal）判断题目类型并给出点击坐标
+3. 用 `answerChallenge()` 按坐标点击（已实现）
+4. 题面文字（prompt）已能拿到，可作为模型的输入提示
