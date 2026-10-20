@@ -253,6 +253,40 @@ async function main() {
     ws.close(); srv.close(); process.exit(1);
   }
 
+  // 先查一次 checksiteconfig，记录 pass 与 JWT 特征（定位环境差异用）
+  try {
+    const cc = await send('Runtime.evaluate', {
+      expression: `new Promise(async res => {
+        try {
+          const sk = ${JSON.stringify(SITEKEY)};
+          const r = await fetch('https://api.hcaptcha.com/checksiteconfig?v=86591f996c36877668d253e353e36fac021db33b&host=b.stripecdn.com&sitekey='+sk+'&sc=1&swa=1', {credentials:'include'});
+          const j = await r.json();
+          const jwt = (j.c||{}).req || '';
+          let pl = null;
+          try { const q = jwt.split('.')[1]; pl = JSON.parse(atob(q.replace(/-/g,'+').replace(/_/g,'/')+'='.repeat((-q.length)%4))); } catch(e){}
+          res(JSON.stringify({http:r.status, pass:j.pass, features:j.features,
+            jwtLen:jwt.length, f:pl&&pl.f, s:pl&&pl.s, t:pl&&pl.t, dlen:pl&&String(pl.d||'').length}));
+        } catch(e) { res('ERR '+String(e).slice(0,150)); }
+      })`, returnByValue: true, awaitPromise: true });
+    console.log('checksiteconfig:', cc.result?.value);
+  } catch (_) {}
+
+  // 采集环境指纹（与服务器对比）
+  try {
+    const fp = await send('Runtime.evaluate', {
+      expression: `JSON.stringify({
+        ua: navigator.userAgent, platform: navigator.platform,
+        webdriver: navigator.webdriver, cores: navigator.hardwareConcurrency,
+        mem: navigator.deviceMemory, screen: screen.width+'x'+screen.height,
+        gpu: (()=>{try{const c=document.createElement('canvas');const g=c.getContext('webgl');
+          const d=g.getExtension('WEBGL_debug_renderer_info');
+          return g.getParameter(d.UNMASKED_RENDERER_WEBGL);}catch(e){return null}})(),
+        brands: navigator.userAgentData ? navigator.userAgentData.brands.map(b=>b.brand) : null,
+        tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      })`, returnByValue: true });
+    console.log('环境:', fp.result?.value);
+  } catch (_) {}
+
   const results = [];
   for (let i = 0; i < RUNS; i += 1) {
     const expr = `window.__solve(${JSON.stringify(SITEKEY)}, ${JSON.stringify(RQDATA)}, ${TIMEOUT * 1000})`;

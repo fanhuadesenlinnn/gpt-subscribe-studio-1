@@ -283,3 +283,81 @@ runtime/rea-capture/
     ├── gc_24ed0064.bin       真品 getcaptcha wire 24,092 字节
     └── gc_ec637546.bin       真品 getcaptcha wire 24,238 字节
 ```
+
+---
+
+## 九、第四轮：矩阵对照与误判纠正
+
+### 9.1 四个出口全部失败，但本机同一出口成功
+
+| 出口 | 出口 IP / ISP | passive | challenge |
+|---|---|---|---|
+| 服务器直连 | <SERVER_IP> Psychz Networks | ✅ 5.1s | ❌ 187s review |
+| 服务器 + US 代理 | 208.76.160.178 North Central | ✅ 6.9s | ❌ 187s review |
+| 服务器 + JP 代理 | （出口查询超时） | ✅ 13.6s | ❌ 187s review |
+| 服务器 + EG 代理 | <PROXY_IP> TE Data | ✅ 12s | ❌ 187s review |
+| **本机直连** | **<PROXY_IP> 腾讯云 JP** | — | **✅ 3/3，369–835ms** |
+
+**关键：本机公网 IP 就是 <PROXY_IP>，正是上一轮判定为「降级池」的腾讯云 IP。**
+所以「IP 被降级」这个结论是错的 —— 同一个 IP 在本机能过、在服务器不能过。
+
+### 9.2 纠正一个持续三轮的误判
+
+之前一直报告 `cells=0`，据此判断「要么复核页、要么无题」。实测把 `cells` 全量打出来后发现：
+
+```
+cells: [
+  {aria: "Skip Challenge",                      x:348 y:571 w:84 h:39},
+  {aria: "About hCaptcha & Accessibility Options", x:28 y:570 w:35 h:35},
+  {aria: "Refresh Challenge.",                  x:73 y:570 w:35 h:35},
+  {aria: "",                                    x:325 y:273 w:30 h:30},
+]
+imgs: [], canvases: 0, prompt: ""
+```
+
+这 4 个「格子」全是**按钮**（Skip / About / Refresh / 无名 30×30）。
+`cells > 0` 并不能说明「有题可答」。真正的判据是：
+
+- `imgs.length > 0` 或 `canvases > 0` → 有题目
+- `prompt` 非空 → 有题干
+- 否则就是空壳复核页
+
+服务端拿到的是**空壳**：无图、无题干、只有三个按钮。
+`canvases` 字段是本轮新增的，用于区分 9 宫格用 canvas 渲染的情况。
+
+### 9.3 环境伪装已达到与本机一致
+
+```json
+// 服务器（修复后）
+{"ua":"...Windows NT 10.0...Chrome/155.0.0.0...","platform":"Win32","cores":8,"mem":8,
+ "gpu":"ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+ "brands":["Google Chrome","Chromium","Not=A?Brand"]}
+
+// 本机
+{"ua":"...Macintosh; Intel Mac OS X 10_15_7...","platform":"MacIntel","cores":10,"mem":16,
+ "gpu":"ANGLE (Apple, ANGLE Metal Renderer: Apple M5)","brands":["Google Chrome","Chromium","Not(A:Brand"]}
+```
+
+两边 `checksiteconfig` 的响应完全一致（`pass:true`，features 相同），
+说明判定发生在 `getcaptcha` 之后，且与 checksiteconfig 无关。
+
+### 9.4 剩余差异（未验证）
+
+1. **页面 DOM 富度**：本机求解后 `bodyLen 8216`、`iframes 2`；服务端求解前 `1692`。
+2. **真实渲染链路**：本机有真实 GPU（Metal），服务端是 `--use-angle=swiftshader` 软渲染，
+   JS 层虽已伪装 GL 字符串，但 `readPixels` / 帧率 / 渲染耗时等旁路信号仍是软渲染特征。
+3. **事件时间分布**：本机人类操作产生真实事件间隔；服务端是脚本合成的固定间隔。
+
+### 9.5 下一步（按性价比排序）
+
+**A. 拿掉 swiftshader**：改成 `--use-angle=gl` 或 `--enable-gpu` + Mesa llvmpipe，
+让渲染耗时分布接近真机。这是最可能见效的一步，且不需要外部依赖。
+
+**B. 放大 DOM 富度**：在伪页面里注入一个与真实 Stripe 结账页相近的 DOM 骨架
+（表单、输入框、按钮、隐藏元素），让 hCaptcha 的 DOM 特征采集有东西可采。
+
+**C. 事件时间分布随机化**：把 humanBeforeExecute 的固定 9–24ms 间隔改成
+带抖动和停顿的真实分布（含加速段、减速段、微停顿）。
+
+**D. 换真实浏览器环境**：服务器装 xvfb + Mesa 已是现状；若 A/B/C 都无效，
+考虑用真实 GPU 的机器（或 macOS runner）跑 solver。
