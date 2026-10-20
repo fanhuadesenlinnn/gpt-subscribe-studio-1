@@ -609,3 +609,99 @@ host=(none)                 → 20038ms timeout
 2. 把 canvas 交给视觉模型（multimodal）判断题目类型并给出点击坐标
 3. 用 `answerChallenge()` 按坐标点击（已实现）
 4. 题面文字（prompt）已能拿到，可作为模型的输入提示
+
+---
+
+## 十二、第七轮：挑战题有了完整可观测性，但作答窗口极窄
+
+### 12.1 三类题目全部拿到结构化数据
+
+| 题型 | 可观测数据 |
+|---|---|
+| 9 宫格（`Find all things with on and off states`） | 9 个 `Challenge Image N` 格子，坐标精确：`(10,130) (140,130) (270,130) / (10,260)...`，每个 120×120 |
+| 线条题（`Please click on the TWO lines that are shorter`） | canvas 1000×940（DPR 2），frame 内位置 `(10,10)` 大小 `500×470` |
+| 空壳复核 | 无 canvas、无 img，只有 Skip/About/Refresh |
+
+### 12.2 新增能力
+
+```
+POST /shoot              截 challenge iframe，返回 base64 PNG + box
+POST /frames             列出所有 frame 的 canvas / imgs / buttons（含坐标）
+POST /answer-at          按 canvas 归一化坐标点击
+POST /solve-then-answer  出题 + 抓 canvas + 截图 一次完成
+GET  /session            会话池
+```
+
+9 宫格格子过滤已修正为 `aria` 以 `Challenge Image` 开头
+（原来按尺寸过滤会把 Skip 按钮也算进去）。
+
+### 12.3 闸门：作答必须在 execute 生命周期内
+
+实测时序：
+
+```
+1. POST /solve-then-answer  → 返回 phase=challenge + 截图（此刻 canvas 在）
+2. 外部看图判断坐标（我这边耗时 30–90 秒）
+3. POST /answer-at          → 返回 no_canvas
+```
+
+`/frames` 复查：
+
+```
+newassets frame: canvas=0, buttons=5, text="Please try again. ⚠️ Skip EN"
+```
+
+**结论：`__reaSolve` 超时那一刻，hCaptcha 内部已放弃这次 challenge，
+canvas 被销毁、页面退回复核态。之后无论多快点击都无效。**
+
+### 12.4 人工给坐标的链路走不通
+
+无论流程怎么优化，只要「看图」发生在 solve 返回之后，
+就必然错过 hCaptcha 的生命周期窗口。实测两次都是 `no_canvas`。
+
+**这不是速度问题，是时序问题**：challenge 的存活期与 execute 的 promise 绑定，
+promise 一旦被我们的超时切断，页面立刻进入失败态。
+
+### 12.5 唯一可行的架构
+
+答题必须**在 execute 的 promise 内部完成**，即：
+
+```js
+hc.execute(rid, opts)          // 不设超时，让它自己跑
+// hCaptcha 在出题后会等待用户点击，此时 canvas 活着
+// 我们需要在同一个 JS 上下文里：
+//   1. 检测到 canvas 出现
+//   2. 把 canvas 内容传出去（或就地分析）
+//   3. 在 canvas 上派发 click 事件
+```
+
+也就是把「看图 → 决策 → 点击」全部放进页面的 execute 生命周期内，
+而不是靠外部 HTTP 调用。
+
+### 12.6 下一步（两条路）
+
+**A. 页面内自动答题**
+
+在 `__reaSolve` 里加一个「题目检测 + 自动点击」循环：
+
+```js
+setInterval(() => {
+  const cv = document.querySelector('canvas');   // 题目出现
+  if (!cv) return;
+  const cells = [...document.querySelectorAll('[aria^="Challenge Image"]')];
+  // 9 宫格题：直接按索引点，无需识别图片内容（题型文字已给出判据）
+  // 线条题：在 canvas 上采样，用页面内 JS 做长度比较
+}, 500);
+```
+
+9 宫格题可以先做——它的判据是「物体类别」，需要视觉理解；
+但**线条题可以在页面内用 canvas 像素直接算长度**，完全不需要外部模型。
+
+**B. 用 execute 的回调驱动**
+
+hCaptcha 的 `execute` 有内部重试；改为监听它的 iframe 变化，
+在 canvas 出现的瞬间冻结画面（`canvas.toDataURL` 后立刻 `getImageData` 保存），
+外部拿到图后再在**保存的快照上**计算坐标，
+然后用**同一份快照的坐标**点击——只要页面没被销毁就行。
+
+但 12.3 已证明页面会被销毁，所以 A 是唯一解。

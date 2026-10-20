@@ -142,10 +142,12 @@ window.__reaSolve = function (sitekey, rqdata, timeoutMs, fraudData) {
         if (rqdata) opts.rqdata = rqdata;
         var t0 = Date.now();
         var done = false;
+        // 超时后把 promise 保留在 window 上，供外部答题后再等结果。
+        // 直接 resolve 会让 hCaptcha 的 execute 变成孤儿，页面被回收后 canvas 就没了。
+        window.__reaPending = { rid: rid, t0: t0, el: null, token: null, error: null };
         var timer = setTimeout(function () {
           if (!done) {
             done = true;
-            // 超时时把现场状态一起带回去，便于定位卡在哪一步
             var frames = [];
             try {
               var fs = document.querySelectorAll('iframe');
@@ -154,19 +156,26 @@ window.__reaSolve = function (sitekey, rqdata, timeoutMs, fraudData) {
                 frames.push(m ? m[1] : 'main');
               }
             } catch (e) {}
-            resolve({ error: 'execute_timeout', elapsedMs: Date.now() - t0,
+            // 不 resolve 掉 execute，留给 window.__reaWait 继续等
+            resolve({ error: 'execute_timeout', pending: true,
+                      elapsedMs: Date.now() - t0,
                       iframes: frames, bodyLen: document.body.innerHTML.length });
           }
         }, timeoutMs || 90000);
         hc.execute(rid, opts).then(function (v) {
+          var tok = (v && v.response) || v;
+          var good = typeof tok === 'string' && tok.length > 100;
+          if (window.__reaPending) {
+            window.__reaPending.token = good ? tok : null;
+            window.__reaPending.ekey = (v && (v.ekey || v.key)) || '';
+            window.__reaPending.error = good ? null : 'short_token';
+          }
           if (done) return;
           done = true; clearTimeout(timer);
-          var tok = (v && v.response) || v;
-          if (typeof tok !== 'string' || tok.length < 100) {
-            return resolve({ error: 'short_token: ' + String(tok).slice(0, 80) });
-          }
+          if (!good) return resolve({ error: 'short_token: ' + String(tok).slice(0, 80) });
           resolve({ token: tok, ekey: (v && (v.ekey || v.key)) || '', elapsedMs: Date.now() - t0 });
         }, function (e) {
+          if (window.__reaPending) window.__reaPending.error = String(e).slice(0, 200);
           if (done) return;
           done = true; clearTimeout(timer);
           resolve({ error: 'execute_failed: ' + String(e).slice(0, 200) });
@@ -675,10 +684,16 @@ class Session {
           return { i, w: c.width, h: c.height, dataUrl: c.toDataURL('image/png') };
         } catch (e) { return { i, err: String(e).slice(0, 60) }; }
       });
-      const bgs = [...document.querySelectorAll('div')]
-        .map((d) => getComputedStyle(d).backgroundImage)
-        .filter((v) => v && v.includes('hcaptcha.com'))
-        .map((v) => v.replace(/^url\("?|"?\)$/g, ''));
+      // 9 宫格图可能用 background-image（hcaptcha.com / blob: / data:）
+      const bgs = [...document.querySelectorAll('div,span,a,button,[role=button]')]
+        .map((d) => {
+          const bi = getComputedStyle(d).backgroundImage || '';
+          const r = d.getBoundingClientRect();
+          const m = bi.match(/url\("?([^")]+)"?\)/);
+          return m ? { src: m[1], x: Math.round(r.x), y: Math.round(r.y),
+                       w: Math.round(r.width), h: Math.round(r.height) } : null;
+        })
+        .filter((v) => v && v.src && /hcaptcha|newassets|blob:|data:image/.test(v.src));
       const prompt = [...document.querySelectorAll('div,span,h2,p')]
         .map((d) => (d.textContent || '').trim())
         .find((t) => /select|choose|click|pick/i.test(t) && t.length < 200) || '';
@@ -694,8 +709,60 @@ class Session {
           h: Math.round(r.height),
         };
       }).filter((c) => c.w > 20 && c.h > 20);
-      return { prompt, header, imgs: [...imgs, ...bgs], canvases, cells, frameUrl: location.href.slice(0, 160) };
+      return { prompt, header, imgs, bgImages: bgs, canvases, cells, frameUrl: location.href.slice(0, 160) };
     }).catch(() => null);
+  }
+
+  /**
+   * 按 challenge 图像内的相对坐标点击（0..1 归一化）。
+   * 用于任意位置的题目（如「点击两条较短的线」），不依赖 9 宫格布局。
+   * coords: [[xN, yN], ...]  xN/yN 是相对于题目 canvas 的归一化坐标。
+   */
+  async answerChallengeAt(coords) {
+    const frameEl = await this.page.$('iframe[src*="frame=challenge"]');
+    if (!frameEl) return { error: 'no_challenge_iframe' };
+    const box = await frameEl.boundingBox();
+    if (!box) return { error: 'no_iframe_box' };
+    // challenge 可能有多层嵌套 iframe，逐个试，找到含大 canvas 的那一层
+    const cands = this.page.frames().filter((f) => /challenge|newassets/.test(f.url()));
+    let fr = null;
+    let canvasInfo = null;
+    for (const f of cands) {
+      try {
+        const info = await f.evaluate(() => {
+          const all = [...document.querySelectorAll('canvas')].map((c) => {
+            const r = c.getBoundingClientRect();
+            return { x: r.x, y: r.y, w: r.width, h: r.height, cw: c.width, ch: c.height };
+          });
+          const big = all.filter((c) => c.w > 80 && c.h > 80)
+            .sort((a, b) => (b.w * b.h) - (a.w * a.h));
+          return { count: all.length, all: all.slice(0, 6), picked: big[0] || null,
+                   href: location.href.slice(0, 100) };
+        });
+        if (info && info.picked) { fr = f; canvasInfo = info; break; }
+        if (!canvasInfo || (info && info.count > (canvasInfo.count || 0))) {
+          canvasInfo = info; fr = fr || f;
+        }
+      } catch (_) {}
+    }
+    if (!fr) return { error: 'no_challenge_frame' };
+
+    const canvas = canvasInfo && canvasInfo.picked;
+    if (!canvas) return { error: 'no_canvas', diag: canvasInfo, framesChecked: cands.length };
+
+    const picked = [];
+    for (const [nx, ny] of coords) {
+      const cx = canvas.x + nx * canvas.w;
+      const cy = canvas.y + ny * canvas.h;
+      const ax = box.x + cx;
+      const ay = box.y + cy;
+      await this.page.mouse.move(ax + (Math.random() - 0.5) * 4, ay + (Math.random() - 0.5) * 4);
+      await sleep(80 + Math.random() * 120);
+      await this.page.mouse.click(ax, ay, { delay: 40 + Math.random() * 50 });
+      picked.push({ nx, ny, ax: Math.round(ax), ay: Math.round(ay) });
+      await sleep(400 + Math.random() * 500);
+    }
+    return { picked, canvas, iframe: { x: Math.round(box.x), y: Math.round(box.y) } };
   }
 
   /** 按格子索引点击（0 基），点完提交。 */
@@ -719,8 +786,10 @@ class Session {
           h: Math.round(r.height),
         };
       })
-      // 只要 9 宫格那种方形格子，排除 Skip/EN/刷新等按钮
-      .filter((c) => c.w >= 80 && c.h >= 80 && Math.abs(c.w - c.h) < 24));
+      // 只要 9 宫格那种方形格子：尺寸接近正方形、aria 以 Challenge Image 开头
+      .filter((c) => c.w >= 80 && c.h >= 80
+        && Math.abs(c.w - c.h) < 24
+        && /challenge image/i.test(c.aria)));
 
     const picked = [];
     for (const idx of indices) {
@@ -759,6 +828,23 @@ class Session {
     if (!btn) return { error: 'no_submit_button' };
     await this.page.mouse.click(box.x + btn.x, box.y + btn.y, { delay: 50 });
     return { clicked: btn.text };
+  }
+
+  /** 读取 __reaPending 里保存的结果（超时后 execute 仍可能在跑）。 */
+  async readPendingToken() {
+    if (!this.page) return null;
+    try {
+      const out = await this.page.evaluate(() => {
+        const p = window.__reaPending;
+        if (!p) return null;
+        return { token: p.token || null, ekey: p.ekey || '', error: p.error || null };
+      });
+      if (out && out.token) {
+        await this.page.evaluate(() => { window.__reaPending = null; });
+        return out;
+      }
+      return out;
+    } catch (_) { return null; }
   }
 
   /** 读取最近一次成功的 token（供图像题提交后取回）。 */
@@ -982,6 +1068,216 @@ const server = http.createServer(async (req, res) => {
     } finally {
       if (owned && session) await dropSession(session.id);
       else if (session) session.busy = false;
+    }
+  }
+
+  // 一次性完成：出题 -> 导出 canvas -> (可选)按坐标作答 -> 拿 token
+  // { session_id, coords?: [[x,y],...], submit?: true, timeout_ms? }
+  if (req.method === 'POST' && url.pathname === '/solve-then-answer') {
+    const body = await readBody(req);
+    const s = sessions.get((body && body.session_id) || '');
+    if (!s) return send(404, { error: 'no_session' });
+    const coords = Array.isArray(body.coords) ? body.coords : null;
+    try {
+      s.busy = true;
+      const out = await s.withLock(async () => {
+        const t0 = now();
+        const solved = await s.solve({
+          sitekey: body.sitekey || DEFAULT_SITEKEY,
+          rqdata: body.rqdata || '',
+          host: body.host || DEFAULT_HOST,
+          timeout: Number(body.timeout_ms || 45000),
+        });
+        // 如果直接拿到 token，结束
+        if (solved.token) return { phase: 'solved', token: solved.token, tokenLen: solved.token.length };
+
+        // 出题了：立即抓 canvas + 截图（此刻页面还在，慢一步就被回收）
+        const ch = solved.challenge || await s.captureChallenge().catch(() => null);
+        const result = { phase: 'challenge', prompt: (ch && ch.prompt) || '',
+                         canvases: (ch && ch.canvases) || [], cells: (ch && ch.cells) || [],
+                         imgs: (ch && ch.imgs) || [], bgImages: (ch && ch.bgImages) || [] };
+        // 同时把整个 challenge iframe 截图带回去，供外部视觉判断
+        try {
+          const el = await s.page.$('iframe[src*="frame=challenge"]');
+          if (el) {
+            const bx = await el.boundingBox();
+            if (bx) {
+              const png = await s.page.screenshot({
+                clip: { x: Math.max(0, bx.x), y: Math.max(0, bx.y),
+                        width: Math.min(bx.width, 2000), height: Math.min(bx.height, 2000) },
+                encoding: 'base64',
+              });
+              result.screenshot = { png, box: { x: Math.round(bx.x), y: Math.round(bx.y),
+                                               w: Math.round(bx.width), h: Math.round(bx.height) } };
+            }
+          }
+        } catch (_) {}
+
+        // 没给坐标就返回，等外部再调一次带 coords
+        if (!coords || !coords.length) {
+          result.needAnswer = true;
+          result.elapsedMs = now() - t0;
+          return result;
+        }
+
+        // 给了坐标：立即点击（此刻 challenge 页面还在）
+        const ans = await s.answerChallengeAt(coords);
+        result.answer = ans;
+        if (ans && ans.error) return result;
+
+        await sleep(400);
+        const sub = await s.submitChallenge();
+        result.submit = sub;
+
+        // 等 token（优先 pending，其次 render callback）
+        const waitUntil = now() + Number(body.wait_ms || 60000);
+        while (now() < waitUntil) {
+          await sleep(1000);
+          const pend = await s.readPendingToken();
+          if (pend && pend.token) { result.token = pend.token; result.tokenLen = pend.token.length; break; }
+          const got = await s.readToken();
+          if (got && got.token) { result.token = got.token; result.tokenLen = got.token.length; break; }
+        }
+        result.elapsedMs = now() - t0;
+        return result;
+      });
+      return send(200, { ok: true, session_id: s.id, ...out });
+    } catch (e) {
+      return send(500, { error: String(e).slice(0, 300) });
+    } finally {
+      s.busy = false;
+    }
+  }
+
+  // 截图：把 challenge iframe 或整页截下来，返回 base64 PNG
+  // { session_id, what?: 'challenge'|'page', clip?: {x,y,width,height} }
+  if (req.method === 'POST' && url.pathname === '/shoot') {
+    const body = await readBody(req);
+    const s = sessions.get((body && body.session_id) || '');
+    if (!s) return send(404, { error: 'no_session' });
+    try {
+      s.busy = true;
+      const b64 = await s.withLock(async () => {
+        const what = (body && body.what) || 'challenge';
+        if (what === 'challenge') {
+          const el = await s.page.$('iframe[src*="frame=challenge"]');
+          if (!el) return null;
+          const box = await el.boundingBox();
+          if (!box) return null;
+          const buf = await s.page.screenshot({
+            clip: { x: Math.max(0, box.x), y: Math.max(0, box.y),
+                    width: Math.min(box.width, 2000), height: Math.min(box.height, 2000) },
+            encoding: 'base64',
+          });
+          return { b64: buf, box: { x: Math.round(box.x), y: Math.round(box.y),
+                                    w: Math.round(box.width), h: Math.round(box.height) } };
+        }
+        const buf = await s.page.screenshot({ encoding: 'base64', fullPage: false });
+        return { b64: buf, box: null };
+      });
+      if (!b64) return send(404, { error: 'challenge iframe not found' });
+      return send(200, { ok: true, box: b64.box, png: b64.b64 });
+    } catch (e) {
+      return send(500, { error: String(e).slice(0, 300) });
+    } finally {
+      s.busy = false;
+    }
+  }
+
+  // 诊断：列出会话里 puppeteer 能看到的全部 frame 及其挑战内容
+  if (req.method === 'POST' && url.pathname === '/frames') {
+    const body = await readBody(req);
+    const s = sessions.get((body && body.session_id) || '');
+    if (!s) return send(404, { error: 'no_session' });
+    try {
+      s.busy = true;
+      const out = await s.withLock(async () => {
+        const list = [];
+        for (const f of s.page.frames()) {
+          let info = null;
+          try {
+            info = await f.evaluate(() => {
+              const cvs = [...document.querySelectorAll('canvas')].map((c) => {
+                const r = c.getBoundingClientRect();
+                return { x: Math.round(r.x), y: Math.round(r.y),
+                         w: Math.round(r.width), h: Math.round(r.height),
+                         cw: c.width, ch: c.height };
+              });
+              const imgs = [...document.querySelectorAll('img')]
+                .map((i) => { const r = i.getBoundingClientRect();
+                  return { src: (i.src || '').slice(0, 90), x: Math.round(r.x), y: Math.round(r.y),
+                           w: Math.round(r.width), h: Math.round(r.height) }; });
+              const btns = [...document.querySelectorAll('div[role=button],button,div.button')]
+                .map((d) => { const r = d.getBoundingClientRect();
+                  return { aria: d.getAttribute('aria-label') || '',
+                           txt: (d.innerText || '').slice(0, 30),
+                           x: Math.round(r.x), y: Math.round(r.y),
+                           w: Math.round(r.width), h: Math.round(r.height) }; })
+                .filter((b) => b.w > 10 && b.h > 10);
+              return {
+                href: location.href.slice(0, 110),
+                bodyLen: document.body.innerHTML.length,
+                text: (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 160),
+                canvases: cvs, imgs, buttons: btns.slice(0, 12),
+              };
+            });
+          } catch (e) { info = { err: String(e).slice(0, 100) }; }
+          list.push({ url: (f.url() || '').slice(0, 110), info });
+        }
+        return list;
+      });
+      return send(200, { frames: out });
+    } catch (e) {
+      return send(500, { error: String(e).slice(0, 300) });
+    } finally {
+      s.busy = false;
+    }
+  }
+
+  // 按归一化坐标作答：{ session_id, coords: [[0.33,0.31],[0.37,0.47]], submit?: true }
+  if (req.method === 'POST' && url.pathname === '/answer-at') {
+    const body = await readBody(req);
+    if (!body) return send(400, { error: 'invalid_json' });
+    const s = sessions.get(body.session_id || '');
+    if (!s) return send(404, { error: 'no_session' });
+    const coords = Array.isArray(body.coords) ? body.coords : [];
+    if (!coords.length) return send(400, { error: 'need coords' });
+    try {
+      s.busy = true;
+      const out = await s.withLock(async () => {
+        const ans = await s.answerChallengeAt(coords);
+        let sub = null;
+        if (body.submit !== false) {
+          await sleep(400 + Math.random() * 400);
+          sub = await s.submitChallenge();
+          await sleep(1500);
+          // 部分题目点完会自动提交，再兜底点一次
+          if (sub && sub.error) {
+            await sleep(800);
+            sub = await s.submitChallenge();
+          }
+        }
+        let tok = null;
+        if (body.wait !== false) {
+          const t0 = now();
+          while (now() - t0 < Number(body.wait_ms || 60000)) {
+            await sleep(1000);
+            // 优先读 __reaPending（那是原始 execute 的 promise 结果）
+            const pend = await s.readPendingToken();
+            if (pend && pend.token) { tok = pend; break; }
+            const got = await s.readToken();
+            if (got && got.token) { tok = got; break; }
+          }
+        }
+        return { answer: ans, submit: sub, token: tok && tok.token ? tok.token : null,
+                 tokenLen: tok && tok.token ? tok.token.length : 0,
+                 pendingErr: tok && tok.error ? tok.error : null };
+      });
+      return send(200, { ok: true, session_id: s.id, ...out });
+    } catch (e) {
+      return send(500, { error: String(e).slice(0, 300) });
+    } finally {
+      s.busy = false;
     }
   }
 
