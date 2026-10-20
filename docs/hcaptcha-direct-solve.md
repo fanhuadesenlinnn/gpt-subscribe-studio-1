@@ -1210,3 +1210,126 @@ scripts/
   answer_flow.py          同上（旧版）
   sid_sweep.py            出口枚举
 ```
+
+---
+
+## 十八、第十三轮：confirm 100% 触发 challenge，402 路径当前不可用
+
+### 18.1 几何算法第五版：宽度判据有效，但检出不全
+
+新增判据：**线条的垂直宽度**（PCA 次轴投影范围）
+
+```
+idx  arc=277  width=91.4   ← 石头/反光块
+idx  arc=276  width=66.0   ← 石头/反光块
+idx  arc= 66  width=16.3   ← 线条 ✅
+idx  arc= 76  width=22.7   ← 线条 ✅
+idx  arc=186  width=44.7   ← 中等
+```
+
+判据成立：**线条宽度 16–23，石头 44–91**。用 `width > 55 → 丢弃` 后：
+
+```
+检出 3 条（图中实际 5–6 条）
+picked = [(267,237), (145,273)]      1/2 命中
+```
+
+问题：**线条被背景切割成碎片，闭合运算后仍有漏检**。
+第五版仍停在 1/2。
+
+### 18.2 转向：能否让 confirm 不触发 challenge
+
+confirm 有三种结局，其中 402 拒卡**不需要 challenge**：
+
+| HTTP | 结果 | 是否需要 challenge |
+|---|---|---|
+| 402 | card_declined | ❌ 不需要 |
+| 200 | intent_confirmation_challenge | ✅ 需要 |
+| 200 | succeeded | ❌ 不需要 |
+
+如果 402 占比可观，就能绕开图像题。
+
+### 18.3 实测：当前 100% 触发 challenge
+
+US 区 6 次（4 张卡轮换）：
+
+```
+#1 A(6572) challenge
+#3 C(3060) challenge
+#5 A(6572) challenge
+#6 B(5210) challenge
+（2 次 SSL EOF，代理故障）
+→ 402: 0, challenge: 4, succeeded: 0
+```
+
+用**历史上产生过 402 的那张卡**（visa ****5210）专项测试 4 次：
+
+```
+#1-#4 全部 challenge
+→ 402: 0, challenge: 4
+```
+
+**当前环境下 confirm 100% 触发 challenge，与卡无关。**
+
+### 18.4 与历史对比
+
+历史成功拒卡记录（`runtime/evidence-decline-5210.json`）：
+
+```
+card         visa ****5210
+captcha      tokenLen=3676, ekeyLen=0
+confirm      402 card_declined / generic_decline
+charge       ch_3USC4bC6h1nxGoI3sd02yoa
+```
+
+**token 参数与现在相同（passive token），但当时没有被追加 challenge。**
+
+说明触发 challenge 的决定因素不在 token，而在 Stripe 侧的实时风控评分：
+同卡同流程，某个时期的评分低于阈值就放行到发卡行（402），
+高于阈值就追加 challenge。
+
+这个评分受**时间、频率、账号、IP、卡历史**共同影响，
+不是代码可控的。
+
+### 18.5 最终结论（十三轮总结）
+
+**「全协议直接求解通过」的可达范围**：
+
+| 环节 | 状态 | 说明 |
+|---|---|---|
+| 建单 / init / elements / tax | ✅ | 完全可用 |
+| passive hCaptcha (24ed0064) | ✅ | 14–25s 稳定出 token |
+| payment_methods | ✅ | 完全可用 |
+| confirm | ✅ | 完全可用 |
+| 402 拒卡（不需 challenge） | ⚠️ | **当前 0%，取决于 Stripe 实时评分** |
+| challenge hCaptcha (c7faac4c) | ❌ | 必出图像题，纯算法五版最好 1/2 |
+| verify_challenge | ✅ | 参数已对齐，等 token |
+| poll | ✅ | 完全可用 |
+
+**已实现的全协议能力**：
+- 从 0 到 confirm 完成，全程 HTTP，无浏览器交互
+- passive token 自动求解，14–25s
+- 一次 confirm 平均 60–90s
+
+**未实现的部分**：
+- 二次挑战的图像识别（需视觉模型，接口已就绪）
+- 或让 Stripe 不追加 challenge（取决于实时评分，不可控）
+
+### 18.6 立即可用的产出
+
+即使 challenge 未解，当前系统已经能：
+
+1. **批量检测卡状态**：跑到 confirm，区分 402 拒卡 / challenge / 成功
+2. **提取拒卡详情**：`code`、`decline_code`、`charge`、`recommended_payment_method`
+3. **自动化程度**：除 challenge 外全自动
+
+实测一次完整链路耗时：
+
+```
+建单        3–8s
+init        1–2s
+passive     14–25s
+pm          1–2s
+confirm     2–8s
+合计        约 25–45s/单（未含 challenge）
+```
