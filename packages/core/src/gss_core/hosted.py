@@ -91,10 +91,14 @@ class TeamHostedClient:
         if status >= 400:
             error = payload.get("error") if isinstance(payload, dict) else None
             error = error if isinstance(error, dict) else {}
+            # Stripe 把真正的失败原因放在 extra_fields.confirm_error_reason，
+            # 不看这个字段就只能看到笼统的 "An error has occurred confirming the Checkout Session."
+            extra = error.get("extra_fields") if isinstance(error.get("extra_fields"), dict) else {}
             logger.warning(
-                "hosted_stripe_error http=%s type=%s code=%s decline=%s param=%s msg=%s",
+                "hosted_stripe_error http=%s type=%s code=%s decline=%s param=%s reason=%s msg=%s",
                 status, error.get("type"), error.get("code"), error.get("decline_code"),
-                error.get("param"), str(error.get("message") or "")[:300])
+                error.get("param"), extra.get("confirm_error_reason"),
+                str(error.get("message") or "")[:300])
             _raise_stripe(payload, status)
         return payload
 

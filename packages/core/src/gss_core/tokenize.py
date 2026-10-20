@@ -9,6 +9,7 @@ rejection. Card data exists only in this call's memory.
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 from decimal import Decimal, InvalidOperation
@@ -103,8 +104,14 @@ def tokenize_card(
         "key": publishable_key,
         "_stripe_version": _HOSTED_VERSION,
     }
-    if billing.get("email"):
-        form["billing_details[email]"] = str(billing["email"])
+    # hosted_checkout 的 confirm 会校验 email 是否已绑在 PaymentMethod 上，
+    # 空着会得到 400 checkout_confirm_error / reason=checkout_email_missing。
+    # 卡主真实邮箱由调用方传入；没填时造一个同名的占位地址，避免整单直接 400。
+    email = str(billing.get("email") or "").strip()
+    if not email:
+        slug = re.sub(r"[^a-z0-9]+", ".", str(billing.get("name") or "cardholder").lower()).strip(".") or "cardholder"
+        email = f"{slug}.{uuid.uuid4().hex[:6]}@gmail.com"
+    form["billing_details[email]"] = email
     if captcha_token:
         form["radar_options[hcaptcha_token]"] = captcha_token
 

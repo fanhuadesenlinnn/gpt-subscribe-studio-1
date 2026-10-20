@@ -18,6 +18,7 @@ import { IconAlertCircle, IconCheck, IconClock, IconX } from "@tabler/icons-reac
 import { useState } from "react";
 
 import { StripeCardFields, type StripeCardHandle } from "../card-payment/CardFields";
+import { CheckoutLinkCard } from "./CheckoutLinkCard";
 
 import { formatAmount, payProtocol, type BillingInput, type ProtocolPayResult } from "../api/client";
 import { randomBillingExample } from "../card-payment/billingExamples";
@@ -283,6 +284,8 @@ export function ProtocolPayPanel({
           </Button>
         )}
       </Paper>
+
+      <CheckoutLinkCard url={checkoutUrl} />
 
       <Alert color="blue" variant="light" icon={<IconAlertCircle size={18} />} title="协议链路（两种取 pm_ 的方式）">
         无论选哪种，Stripe 侧都是服务端按真实浏览器时序跑完：

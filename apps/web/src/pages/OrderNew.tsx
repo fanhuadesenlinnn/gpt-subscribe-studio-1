@@ -1,5 +1,5 @@
-import { Alert, Anchor, Button, Code, CopyButton, Group, Paper, SegmentedControl, Select, Stack, Stepper, Text } from "@mantine/core";
-import { IconAlertCircle, IconCheck, IconCopy, IconExternalLink } from "@tabler/icons-react";
+import { Alert, Anchor, Button, Group, Paper, SegmentedControl, Select, Stack, Stepper, Text } from "@mantine/core";
+import { IconAlertCircle, IconCheck } from "@tabler/icons-react";
 import { useEffect, useRef, useState } from "react";
 
 import {
@@ -27,6 +27,7 @@ import { SessionField } from "../components/SessionField";
 import { StripeCardFields, loadStripe, type StripeCardHandle } from "../card-payment/CardFields";
 import { TeamPaymentPanel } from "../components/TeamPaymentPanel";
 import { ProtocolPayPanel } from "../components/ProtocolPayPanel";
+import { CheckoutLinkCard } from "../components/CheckoutLinkCard";
 import { randomBillingExample } from "../card-payment/billingExamples";
 import { emptyTeamCard, type TeamCardDraft } from "../card-payment/TeamCardForm";
 
@@ -363,6 +364,10 @@ export function OrderNew({ onRecord }: Props) {
             <Stepper.Step label="结果" description="成功或失败" />
           </Stepper>
 
+          {order?.checkout_url && step >= 1 && (
+            <CheckoutLinkCard url={order.checkout_url} />
+          )}
+
           {step < 2 && !linkOnly && (
             <SegmentedControl
               fullWidth
@@ -463,51 +468,26 @@ export function OrderNew({ onRecord }: Props) {
           {step === 1 && order && linkOnly && (
             <Stack gap="md">
               <Alert color="green" variant="light" icon={<IconCheck size={18} />} title="结账已创建">
-                官方付款链接已生成，可打开页面完成付款。金额、折扣和税费以官方结账页为准，付款后回到本页查询订阅。
+                官方付款链接已生成（见上方卡片）。金额、折扣和税费以官方结账页为准，
+                付款后回到本页点「我已支付，查询订阅」。
               </Alert>
-              <Code block style={{ wordBreak: "break-all", whiteSpace: "pre-wrap" }}>
-                {order.checkout_url}
-              </Code>
               <Group>
-                <Button
-                  component="a"
-                  href={order.checkout_url || "#"}
-                  target="_blank"
-                  rel="noreferrer"
-                  leftSection={<IconExternalLink size={16} />}
-                  variant="light"
-                >
-                  打开长链
+                <Button type="button" variant="light" loading={busy} onClick={async () => {
+                  setBusy(true);
+                  setError(null);
+                  try {
+                    const checked = await verifyOrder(order.id);
+                    setOrder(checked);
+                    if (checked.subscription?.active || SUCCESS_STATUSES.includes(checked.status)) finish(checked);
+                    else setError(checked.last_error || "订阅尚未生效，请稍后再查询。");
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : "查询订阅失败");
+                  } finally {
+                    setBusy(false);
+                  }
+                }}>
+                  我已支付，查询订阅
                 </Button>
-                <CopyButton value={order.checkout_url ?? ""}>
-                  {({ copied, copy }) => (
-                    <Button
-                      variant="default"
-                      onClick={copy}
-                      leftSection={copied ? <IconCheck size={16} /> : <IconCopy size={16} />}
-                    >
-                      {copied ? "已复制" : "复制链接"}
-                    </Button>
-                  )}
-                </CopyButton>
-                {!linkOnly && (
-                  <Button type="button" variant="default" loading={busy} onClick={async () => {
-                    setBusy(true);
-                    setError(null);
-                    try {
-                      const checked = await verifyOrder(order.id);
-                      setOrder(checked);
-                      if (checked.subscription?.active || SUCCESS_STATUSES.includes(checked.status)) finish(checked);
-                      else setError(checked.last_error || "订阅尚未生效，请稍后再查询。");
-                    } catch (err) {
-                      setError(err instanceof Error ? err.message : "查询订阅失败");
-                    } finally {
-                      setBusy(false);
-                    }
-                  }}>
-                    我已支付，查询订阅
-                  </Button>
-                )}
               </Group>
             </Stack>
           )}
