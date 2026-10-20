@@ -2422,3 +2422,150 @@ RoxyBrowser 未安装（无安装包，官方站点在本机网络不可达）
 
 指纹浏览器内核能伪造 `mediump` 精度和 canvas 噪声，
 这是本轮剩余两个硬差异之一。**装上后需实测 `c7faac4c` 是否变好。**
+
+---
+
+## 二十八、第二十二轮（续）：RoxyBrowser 接入代码已就绪
+
+### 28.1 已完成的接入工作
+
+**A. 新增 `tools/hcaptcha-solver/roxy.js`** —— RoxyBrowser 本地 API 客户端
+
+```js
+const BASE_HOST = process.env.ROXY_HOST || '127.0.0.1';
+const BASE_PORT = Number(process.env.ROXY_PORT || 50000);
+const TOKEN     = process.env.ROXY_TOKEN || '';
+
+roxy.health()            GET  /health
+roxy.listProfiles()      POST /browser/list
+roxy.openProfile(dirId)  POST /browser/open   → { ws, ... }
+roxy.closeProfile(dirId) POST /browser/close
+roxy.ensureProfile()     用 ROXY_DIR_ID 或列表里第一个
+```
+
+**B. `server.js` 的 `launchBrowser()` 增加 roxy 分支**
+
+```js
+if (process.env.BROWSER_MODE === 'roxy') {
+  const roxy = require('./roxy');
+  const dirId = await roxy.ensureProfile();
+  const info = await roxy.openProfile(dirId, extraArgs);
+  const ws = info.ws || info.wsEndpoint;
+  const browser = await puppeteer.connect({
+    browserWSEndpoint: ws,
+    defaultViewport: null,
+  });
+  return browser;   // 其余逻辑（render / execute / 视觉）完全复用
+}
+```
+
+用环境变量开启：
+
+```bash
+BROWSER_MODE=roxy \
+ROXY_HOST=127.0.0.1 ROXY_PORT=50000 ROXY_TOKEN=<api key> \
+ROXY_DIR_ID=<profile id> \
+node tools/hcaptcha-solver/server.js
+```
+
+### 28.2 官方 API 规格（已从 GitHub 仓库确认）
+
+来源：`roxybrowserlabs/local-API`
+
+```
+API host    http://127.0.0.1:50000     （默认端口，可在 GUI 里改）
+认证        所有请求 header 里带 token
+开关        必须先到 GUI 里打开 【API → API Configuration → Switch】
+关键接口
+  POST /browser/open   { dirId, args: [] }
+       → { code:0, data:{ ws: "ws://127.0.0.1:xxxxx/devtools/browser/..." } }
+  POST /browser/close  { dirId }
+  POST /browser/list   { page, pageSize }
+  GET  /browser/connection_info
+```
+
+连接方式（官方示例）：
+
+```js
+const rsp = await roxy_client.browser_open(browser_id);
+const browser = await puppeteer.connect({
+  browserWSEndpoint: rsp["data"]["ws"],
+  defaultViewport: null,
+});
+```
+
+**和我们的 solver 结构完全吻合，接上就能用。**
+
+### 28.3 服务器环境已备好
+
+```
+Ubuntu 24.04 / x86_64 / 8 核 / 31G 内存 / 168G 空闲
+xvfb       ✅ 1920x1080x24
+openbox    ✅ 已运行（解决 avail===screen 的 headless 特征）
+字体       ✅ 401 个，含 13 个 Windows 常见名（别名映射）
+```
+
+### 28.4 卡点：Linux 安装包
+
+尝试结果：
+
+```
+https://roxybrowser.com/download         200，页面有 "Linux(64-bit)" 按钮
+下载链接由前端 JS 动态生成：
+  ${base}/app-download/Linux-latest
+  文件名模板  RoxyBrowser_${arch}_${version}_${channel}.deb
+试过的 base 全部返回 SPA fallback（404 / index.html）：
+  api.roxybrowser.net / roxybrowser.com / app.roxybrowser.com / dl.roxybrowser.com
+OSS 桶 lumibrowser.oss-cn-shenzhen.aliyuncs.com 目录不可列（AccessDenied）
+```
+
+**需要从 RoxyBrowser GUI 或登录后的下载页拿真实 .deb 地址。**
+
+### 28.5 交接清单
+
+要在服务器上跑起来，需要这三样：
+
+1. **Linux .deb 安装包**（或它在登录后的下载链接）
+2. **API Key**（GUI → API → API Configuration → API Key）
+3. **一个 profile 的 dirId**（GUI 里建一个指纹环境，选 Linux/Windows + 代理）
+
+拿到后：
+
+```bash
+dpkg -i RoxyBrowser_*.deb
+# 启动（需要 X 显示，xvfb 已就绪）
+DISPLAY=:99 roxybrowser &
+# 验证
+curl -H "token: $ROXY_TOKEN" http://127.0.0.1:50000/health
+```
+
+然后切 solver：
+
+```bash
+systemctl edit gss-solver
+# 加：
+# Environment=BROWSER_MODE=roxy
+# Environment=ROXY_TOKEN=...
+# Environment=ROXY_DIR_ID=...
+```
+
+### 28.6 预期收益与风险
+
+**能解决的**
+
+| 硬差异 | 现状 | RoxyBrowser |
+|---|---|---|
+| `mediump` 精度 | `10/15/15`（Mesa llvmpipe） | 指纹内核可伪造成 `23/127/127` |
+| canvas 哈希 | Linux 字体渲染值 | 可注入噪声 |
+| 字体列表 | 13（别名映射） | 可按 profile 配置完整列表 |
+| 屏幕/DPR/窗口 | 已自洽 | 可完全自定义 |
+
+**解决不了的**
+
+| 项 | 说明 |
+|---|---|
+| CPU 性能基线 | 1999 vs 11845 loops/ms，真实硬件差异 |
+| 服务器 IP 信誉 | 机房 IP 长期高频访问的累积评分 |
+
+**本轮已验证**：仅「指纹自洽化」（不装 RoxyBrowser）就让 passive 从 14–25s 提速到 13.1–13.6s。
+说明 hCaptcha 确实在读这些信号，指纹内核补齐后应有进一步改善。

@@ -547,6 +547,35 @@ function splitProxy(proxy) {
 async function launchBrowser(proxy) {
   const p = splitProxy(proxy);
   const merchant = ORIGIN_MODE === 'merchant';
+
+  // ── RoxyBrowser 指纹浏览器模式 ──
+  // 用它的本地 API 打开一个指纹环境，再 puppeteer.connect 上去。
+  // 这样 WebGL 精度 / canvas 噪声 / 字体 / 屏幕等硬指纹由它的内核提供，
+  // 而不是像 headless Chrome 那样暴露 Mesa llvmpipe 的真实值。
+  if (process.env.BROWSER_MODE === 'roxy') {
+    const roxy = require('./roxy');
+    const dirId = await roxy.ensureProfile();
+    console.log('   [roxy] opening profile', String(dirId).slice(0, 12));
+    const extraArgs = [];
+    if (p.server) extraArgs.push(`--proxy-server=${p.server}`);
+    if (merchant) {
+      extraArgs.push('--ignore-certificate-errors', '--allow-insecure-localhost',
+        `--host-resolver-rules=MAP ${MERCHANT_HOST} 127.0.0.1:${MERCHANT_PORT}`,
+        `--proxy-bypass-list=<-loopback>;${MERCHANT_HOST}`);
+    }
+    const info = await roxy.openProfile(dirId, extraArgs);
+    const ws = info.ws || info.wsEndpoint || info.wsEndpointUrl;
+    if (!ws) throw new Error('roxy open 返回里没有 ws 地址: ' + JSON.stringify(info).slice(0, 300));
+    console.log('   [roxy] ws =', String(ws).slice(0, 60));
+    const browser = await puppeteer.connect({
+      browserWSEndpoint: ws,
+      defaultViewport: null,
+    });
+    browser.__roxyDirId = dirId;
+    browser.__roxyProxyAuth = p.auth || null;
+    return browser;
+  }
+
   const extra = merchant
     ? [
         '--ignore-certificate-errors',
