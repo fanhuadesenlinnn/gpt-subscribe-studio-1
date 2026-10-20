@@ -2161,3 +2161,123 @@ hCaptcha 的 9 宫格可能有多页（`page 1 of 2` 出现在 Skip 的 aria 里
    - `captureChallenge` 前先轮询检测所有格子图片 `complete === true`
 2. **支持多页题目**（`page 1 of 2`）
 3. **调低选取阈值**，宁可少选也不错选
+
+---
+
+## 二十六、第二十一轮：Verify 按钮已通，发现 canvas 与截图的取舍
+
+### 26.1 ★ 首次成功点到 Verify 并执行完整作答
+
+```
+phase  : grid_answered
+indices: [2, 5, 6]
+ans    : {"picked":[{"idx":2,"aria":"Challenge Image 3"},
+                    {"idx":5,"aria":"Challenge Image 6"},
+                    {"idx":6,"aria":"Challenge Image 7"}], "cells":9}
+submit : {"clicked": "Verify"}
+```
+
+**这是一次完整闭环**：识别 3 个目标 → 逐格点击 → 找到并点击 `Verify`。
+
+说明 `submitChallenge` 的遍历 frame 改进生效了，
+`Verify` 和 `Next` 两种按钮都能正确识别。
+
+### 26.2 重大发现：9 宫格是画在单个大 canvas 上的
+
+DOM 结构探查：
+
+```
+frame newassets.hcaptcha.com  canv=1  imgs=0  btns=5
+  canvas {'x':10, 'y':10, 'w':500, 'h':470, 'cw':1000, 'ch':940}
+```
+
+**整个 9 宫格（含 9 张图）是绘制在 1 个 500×470 的 canvas 里**，
+不是 9 个 `<img>`，这解释了：
+
+- 为什么 `waitChallengeImages` 返回 `total: 0`（没有 img 元素）
+- 为什么 `captureChallenge` 的 `imgs` 一直为空
+- 为什么之前用 `background-image` 也检测不到
+
+### 26.3 陷阱：canvas 不能用来做视觉判断
+
+canvas 的 1000×940 内部像素里，**顶部约 240px 是空白**
+（题干栏和例题缩略图不在 canvas 内，它们在同级 DOM 里）。
+
+用 canvas 交给视觉服务的结果：
+
+```
+example: "black square"            ← 模型看到的是空白区
+category: "none (does not travel)" ← 判断失效
+picks: []
+→ phase = grid_no_picks
+```
+
+必须用 **iframe 截图**（520×570，包含题干栏 + 例题缩略图）：
+
+```
+example: "bed with white bedding"  ← 正确
+indices: [2,5,6]
+→ phase = grid_answered, 点 Verify 成功
+```
+
+**结论：视觉判断用截图，格子坐标用 iframe 归一化（0.279/0.500/0.721 × 0.374/0.526/0.681）。**
+
+### 26.4 canvas 坐标标定（备用）
+
+若将来确实要用 canvas，实测格子中心：
+
+```
+列 x = 275 / 505 / 735   →  0.2750 / 0.5050 / 0.7350
+行 y = 385 / 615 / 845   →  0.4096 / 0.6543 / 0.8989
+（canvas 内部 1000x940，顶部 240px 为空白）
+```
+
+验证：9 个圈精确命中格子中心。
+
+### 26.5 分支判据修正
+
+原来按题干文字判断题型：
+
+```js
+const isLinePrompt = /lines?\b|curve|shorter|longer/i.test(prompt);
+```
+
+问题：网格题题干是 `Select the thing that moves...` / `Tap on the item...`，
+不含 line 字样但**同样有 canvas**，会被错分到线条分支。
+
+修正：
+
+```js
+const hasBigCanvas = realCanvases.some(c => (c.dataUrl||'').length > 500);
+const useLineBranch = isLinePrompt && hasBigCanvas;
+```
+
+### 26.6 当前状态
+
+| 环节 | 状态 | 证据 |
+|---|---|---|
+| 题型分流 | ✅ | 按 canvas + 题干双重判据 |
+| iframe 截图 | ✅ | 520×570，含题干栏与缩略图 |
+| 视觉识别格子 | ✅ | tiles 多次全对 |
+| 视觉判断目标 | ✅ | picks 合理 |
+| 格子坐标 | ✅ | 3×3 中心精确命中 |
+| 点击格子 | ✅ | `Challenge Image N` 被点中 |
+| **点 Verify / Next** | ✅ | `{"clicked": "Verify"}` |
+| 答案被 hCaptcha 接受 | ❌ | 仍需提升准确率 |
+
+### 26.7 剩余难点
+
+视觉判断在「多选题」上仍不够准：
+
+```
+tiles: ["seal in pool","shovel","alarm clock","seal in pool","green sleigh",
+        "alarm clock","alarm clock","red sleigh","shovel"]
+example: "bed with white bedding"
+indices: [2,5,6]
+```
+
+例题是「床」，格子却全是海豹/铲子/闹钟/雪橇——**两者语义不搭**，
+说明该题的缩略图或题目类型与 9 宫格不匹配（可能是另一类题）。
+
+需要在视觉侧加一层「题目-格子语义一致性检查」：
+若 example 与所有 tiles 完全不相关，则判定为不支持的题型，直接 Skip 换题。

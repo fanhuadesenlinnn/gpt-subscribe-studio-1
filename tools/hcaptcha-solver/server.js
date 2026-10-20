@@ -1106,6 +1106,55 @@ class Session {
   }
 
   /** 抓取当前 challenge iframe 的题目文字、九宫格图 URL 与格子索引。 */
+  /**
+   * 等 challenge 里的图片全部加载完。
+   * 实测直接截图会拍到 blank/empty 的格子——图片还没 decode 完。
+   * 返回 { total, loaded, waitedMs }。
+   */
+  async waitChallengeImages(maxWaitMs = 6000) {
+    const frames = this.page.frames().filter((f) => /challenge|newassets/.test(f.url()));
+    const t0 = now();
+    let last = null;
+    while (now() - t0 < maxWaitMs) {
+      let allDone = true;
+      let total = 0;
+      let loaded = 0;
+      for (const fr of frames) {
+        try {
+          const st = await fr.evaluate(() => {
+            const im = [...document.querySelectorAll('img')];
+            const done = im.filter((i) => i.complete && i.naturalWidth > 0).length;
+            // 9 宫格的图常用 background-image，检查这些 div 有没有实际尺寸
+            const bgEls = [...document.querySelectorAll('div,span,a,[role=button],td')]
+              .filter((d) => {
+                const bi = getComputedStyle(d).backgroundImage || '';
+                if (!/url\(/.test(bi)) return false;
+                const r = d.getBoundingClientRect();
+                return r.width > 40 && r.height > 40;
+              });
+            // canvas 型格子
+            const cvs = [...document.querySelectorAll('canvas')]
+              .filter((c) => c.width > 40 && c.height > 40);
+            return { n: im.length, done, bg: bgEls.length, canv: cvs.length };
+          });
+          total += st.n;
+          loaded += st.done;
+          if (st.n > 0 && st.done < st.n) allDone = false;
+          if (st.bg > 0 || st.canv > 0) {
+            // 有 background-image 或 canvas 格子，视为已有内容
+            total = Math.max(total, 1);
+            loaded = Math.max(loaded, allDone ? 1 : 0);
+          }
+        } catch (_) {}
+      }
+      last = { total, loaded, waitedMs: Math.round(now() - t0) };
+      if (total === 0) { await sleep(300); continue; }
+      if (allDone) return { ...last, ready: true };
+      await sleep(250);
+    }
+    return { ...(last || { total: 0, loaded: 0, waitedMs: maxWaitMs }), ready: false };
+  }
+
   async captureChallenge() {
     const fr = this.page.frames().find((f) => /challenge/.test(f.url()));
     if (!fr) return null;
@@ -1773,29 +1822,46 @@ const server = http.createServer(async (req, res) => {
         const prompt = (ch && ch.prompt) || '';
         const cvs = (ch && ch.canvases) || [];
         const cells = (ch && ch.cells) || [];
-        // 题干含 line/curve/shorter 才走线条题；其余一律按 9 宫格处理
-        // （格子未必是 button 元素，captureChallenge 拿不到，所以不能靠格子数量判断）
+        // 判据用「有没有 canvas」而不是题干文字：
+        // hCaptcha 的 9 宫格也画在一个 500x470 的大 canvas 上，
+        // 题干（Select the thing / Tap on the item）不含 line 字样。
+        const realCanvases = (ch && ch.canvases) || [];
+        const hasBigCanvas = realCanvases.some((c) => (c.dataUrl || '').length > 500);
         const isLinePrompt = /lines?\b|curve|shorter|longer/i.test(prompt);
+        // canvas 存在且题干是线条类 → 线条题；其余（含 canvas 型网格）走截图网格分支
+        const useLineBranch = isLinePrompt && hasBigCanvas;
 
         const gridCells = cells.filter((c) => c.w >= 80 && c.h >= 80 &&
           Math.abs(c.w - c.h) < 30 && !/skip|about|refresh|english/i.test(c.aria || ''));
 
         // ── 9 宫格题：截图后交给视觉服务按索引作答 ──
-        if (!isLinePrompt) {
+        if (!useLineBranch) {
+          // 先等所有格子图片加载完，否则截图会拍到空白格
+          const loadState = await s.waitChallengeImages(6000).catch(() => null);
+          console.log('   [grid] images', JSON.stringify(loadState));
           let shot = null;
-          try {
-            const el = await s.page.$('iframe[src*="frame=challenge"]');
-            if (el) {
-              const bx = await el.boundingBox();
-              if (bx) {
-                shot = await s.page.screenshot({
-                  clip: { x: Math.max(0, bx.x), y: Math.max(0, bx.y),
-                          width: Math.min(bx.width, 2000), height: Math.min(bx.height, 2000) },
-                  encoding: 'base64',
-                });
+          const bigCv = realCanvases
+            .filter((c) => (c.dataUrl || '').length > 500)
+            .sort((a, b) => (b.w * b.h) - (a.w * a.h))[0];
+          // 重要：网格题必须用 iframe 截图，不能用 canvas。
+          // canvas 里顶部 240px 是空白（题干栏不在 canvas 内），
+          // 用 canvas 会让模型看不到例题缩略图，误判成 "black square"。
+          if (true) {
+            try {
+              const el = await s.page.$('iframe[src*="frame=challenge"]');
+              if (el) {
+                const bx = await el.boundingBox();
+                if (bx) {
+                  shot = await s.page.screenshot({
+                    clip: { x: Math.max(0, bx.x), y: Math.max(0, bx.y),
+                            width: Math.min(bx.width, 2000),
+                            height: Math.min(bx.height, 2000) },
+                    encoding: 'base64',
+                  });
+                }
               }
-            }
-          } catch (_) {}
+            } catch (_) {}
+          }
           if (!shot) return { phase: 'grid', error: 'no_shot', prompt, cells: gridCells };
           let gv = null;
           try {
@@ -1821,10 +1887,12 @@ const server = http.createServer(async (req, res) => {
           if (gridCells.length >= 4) {
             ans = await s.answerChallenge(idx);
           } else {
-            // 无 aria 时按几何布局推算 3x3 格子中心。
-            // 系数由实测截图 (520x570) 标定：
-            //   列中心 x = 145/260/375  →  0.279 / 0.500 / 0.721
-            //   行中心 y = 213/300/388  →  0.374 / 0.526 / 0.681
+            // 3x3 格子中心，分两套系数：
+            //  A. canvas 型网格（canvas 1000x940，顶部约 240px 是题干栏空白）
+            //     实测列 275/505/735，行 385/615/845
+            //  B. iframe 截图型（520x570）
+            //     实测列 145/260/375，行 213/300/388
+            // iframe 截图 (520x570) 的格子中心实测值
             const XS = [0.279, 0.500, 0.721];
             const YS = [0.374, 0.526, 0.681];
             const coords = idx.map((k) => [XS[k % 3], YS[Math.floor(k / 3)]]);
