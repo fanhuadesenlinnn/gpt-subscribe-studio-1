@@ -1333,3 +1333,130 @@ pm          1–2s
 confirm     2–8s
 合计        约 25–45s/单（未含 challenge）
 ```
+
+---
+
+## 十九、第十四轮：逐项消融，锁定 TLS 层差异
+
+### 19.1 消融实验：三个怀疑点全部排除
+
+怀疑 solver 页面的额外逻辑导致出题（AB 页 14/15 成功，solver 页 0/N）：
+
+| 关闭项 | 参数 | 结果 |
+|---|---|---|
+| 默认（全开） | — | ❌ 0/2 |
+| 关鼠标模拟 | `human: false` | ❌ 0/2 |
+| 关鼠标 + 关 frame 注入 | `human: false, inject: false` | ❌ 0/2 |
+
+**三者都不是原因。**
+
+### 19.2 最小页面复现：仍失败
+
+把 solver 页面替换成与 AB 页**逐行相同**的精简版本（`SIMPLE_PAGE=true`）：
+
+```html
+<script src="https://hcaptcha.com/1/api.js?onload=captchaLoad&render=explicit"></script>
+<div id="root"></div>
+<script>
+window.__reaSolve = function(sk, rq, tmo) {
+  return window.__lib.then(hc => {
+    const d = document.createElement('div');
+    d.id = 'hcaptcha-invisible-' + sk;
+    document.getElementById('root').appendChild(d);
+    const rid = hc.render(d, {sitekey: sk, size:'invisible', host: HOST,
+                              'error-callback': e => {}});
+    return new Promise(res => setTimeout(() => {
+      hc.execute(rid, {async:true, rqdata: rq})
+        .then(v => res({token: v.response}), e => res({error: e}));
+    }, 2500));
+  });
+};
+</script>
+```
+
+结果：**❌ 0/6，仍然全部出题。**
+
+### 19.3 origin 也排除
+
+把 merchant host 从 `b.stripecdn.com` 换成 AB 页用的 `hcaptcha-test.local`：
+
+```
+❌ 0/6，仍然全部出题
+```
+
+题目类型轮换出现：线条题 / 9 宫格 / towers / drag animal。
+
+### 19.4 同期对照：本机仍是部分成功
+
+同一时间窗口，本机 AB 页：
+
+```
+#1 execute_timeout
+#2 execute_timeout
+#3 ✅ token
+#4 ✅ token
+→ 2/4 成功
+```
+
+**本机 50%，服务器 0%。同代码、同页面、同 sitekey、同期。**
+
+### 19.5 找到的第一个不可配置差异：TLS 指纹
+
+```
+本机   curl ja3 = 375c6162a492dfbf2795909110ce8424   49 个 cipher
+服务器 curl ja3 = 0149f47eabf9a20d0893e2a44e5a6323   31 个 cipher
+```
+
+**两者 ja3 完全不在同一集合，cipher 数量差 18 个。**
+
+这说明两台机器的 TLS 栈根本不同：
+
+- 本机：macOS 系统 OpenSSL/LibreSSL，cipher suite 全
+- 服务器：Ubuntu 24.04 OpenSSL 3.x，默认策略裁剪过
+
+虽然页面请求由 Chrome 发起（Chrome 自带 BoringSSL，理论上跨平台一致），
+但以下环节会暴露系统 TLS 栈：
+
+1. Chrome 的 DNS-over-HTTPS / 系统解析
+2. 证书链验证走系统 trust store
+3. hCaptcha 的 `hsw` wasm 在某些检测里会调用 `crypto.subtle`，其实现与平台相关
+4. **代理链路的 TLS**（服务器 solver 走 <PROXY_PROVIDER> 代理，本机 AB 页直连）
+
+第 4 点最关键 —— 两侧的**代理链路完全不同**。
+但第 19.3 的 `hcaptcha-test.local` 实验里本机也走直连、服务器也走直连（loopback），
+所以这条不能解释全部。
+
+### 19.6 十四轮完整排除表
+
+| # | 假设 | 结论 |
+|---|---|---|
+| A | swiftshader 渲染特征 | ❌ |
+| B | DOM 富度 | ❌ |
+| C | 鼠标事件模拟 | ❌ 消融验证 |
+| D | 出口 IP 信誉 | ❌ 6 家 ISP |
+| E | render 缺 host | ❌ |
+| F | checksiteconfig pass | ❌ 完全相同 |
+| G | Chrome 版本 | ❌ |
+| H | userAgentData JS 伪造 | ❌ |
+| I | iframe/widget 累积 | ⚠️ 部分 |
+| J | IP 累积配额 | ❌ 新 IP 首次也失败 |
+| K | 页面代码差异 | ❌ SIMPLE_PAGE 逐行相同仍失败 |
+| L | frame 注入 / 自动答题器 | ❌ 消融验证 |
+| M | origin 域名 | ❌ test.local 也失败 |
+| **N** | **TLS / 系统栈差异** | **⚠️ 唯一未排除，且有 ja3 证据** |
+
+### 19.7 结论
+
+**服务器侧的一切可配置项都已对齐到与本机一致，仍然 0% 成功。**
+唯一剩下的差异是操作系统与 TLS 栈，这个无法通过配置消除。
+
+**务实结论**：
+
+1. **passive token 在服务器上可用**（14–25s，已多轮验证）
+2. **challenge token 在服务器上不可用**（0/N，十四轮未破）
+3. 本机 challenge 成功率约 50%，不稳定
+4. 二次挑战本质上是 hCaptcha 的「必须真人」闸门
+
+**如果必须过二次挑战**，可行方案只剩：
+- 接视觉模型做图像题识别（接口已就绪）
+- 或在真实用户浏览器里完成

@@ -293,7 +293,8 @@ window.__reaAuto = {
   }
 };
 
-window.__reaSolve = function (sitekey, rqdata, timeoutMs, fraudData) {
+window.__reaSolve = function (sitekey, rqdata, timeoutMs, fraudData, opts) {
+  var REA_OPTS = opts || {};
   return window.__reaLib.then(function (hc) {
     if (!hc || typeof hc.render !== 'function') {
       return { error: 'no_hcaptcha' };
@@ -345,7 +346,7 @@ window.__reaSolve = function (sitekey, rqdata, timeoutMs, fraudData) {
         // 启动页面内自动答题器：必须与 execute 并行，
         // 因为 challenge 的存活期绑定在 execute 的 promise 上。
         try {
-          if (window.__reaAuto && !window.__reaAuto.active) {
+          if (REA_OPTS.noAuto !== true && window.__reaAuto && !window.__reaAuto.active) {
             window.__reaAuto.start({ intervalMs: 350, maxAttempts: 3 });
           }
         } catch (e) {}
@@ -394,7 +395,58 @@ window.__reaSolve = function (sitekey, rqdata, timeoutMs, fraudData) {
 };
 </script></body></html>`;
 // 延迟求值：PAGE_HTML 依赖 MERCHANT_HOST，而后者在下方才定义
-const PAGE_HTML_GET = () => buildPageHtml().replace('__MERCHANT_HOST__', MERCHANT_HOST);
+// 精简页：与 tools/rea-chrome/ip_ab_test.cjs 的 PAGE 完全一致。
+// 实测 AB 页 14/15 成功，而完整页 0/N，用 SIMPLE_PAGE=true 切换对比。
+const buildSimplePage = (host) => `<!doctype html><html><head><meta charset="utf-8">
+<title>HCaptchaInvisible</title>
+<script src="https://hcaptcha.com/1/api.js?onload=captchaLoad&render=explicit" async defer></script>
+</head><body><div id="root"></div>
+<script>
+window.__lib = new Promise(function (resolve) {
+  if (window.hcaptcha) return resolve(window.hcaptcha);
+  window.captchaLoad = function () { resolve(window.hcaptcha); };
+});
+window.__reaSolve = function (sk, rq, tmo) {
+  return window.__lib.then(function (hc) {
+    var d = document.createElement('div');
+    d.id = 'hcaptcha-invisible-' + sk;
+    (document.getElementById('root') || document.body).appendChild(d);
+    var rid;
+    try {
+      rid = hc.render(d, {
+        sitekey: sk, size: 'invisible', host: ${JSON.stringify(host)},
+        'error-callback': function (e) { window.__rcbErr = String(e).slice(0, 200); },
+      });
+    } catch (e) { return { error: 'render_failed: ' + String(e).slice(0, 160) }; }
+    return new Promise(function (resolve) {
+      setTimeout(function () {
+        var opts = { async: true };
+        if (rq) opts.rqdata = rq;
+        var t0 = Date.now(), done = false;
+        var timer = setTimeout(function () {
+          if (!done) { done = true; resolve({ error: 'execute_timeout', ms: Date.now() - t0 }); }
+        }, tmo);
+        hc.execute(rid, opts).then(function (v) {
+          if (done) return; done = true; clearTimeout(timer);
+          var tok = (v && v.response) || v;
+          if (typeof tok !== 'string' || tok.length < 100)
+            return resolve({ error: 'short_token', ms: Date.now() - t0 });
+          resolve({ token: tok, len: tok.length, ms: Date.now() - t0 });
+        }, function (e) {
+          if (done) return; done = true; clearTimeout(timer);
+          resolve({ error: 'execute_failed: ' + String(e).slice(0, 200), ms: Date.now() - t0 });
+        });
+      }, 2500);
+    });
+  });
+};
+</script></body></html>`;
+
+const SIMPLE_PAGE = process.env.SIMPLE_PAGE === 'true';
+
+const PAGE_HTML_GET = () => (SIMPLE_PAGE
+  ? buildSimplePage(MERCHANT_HOST)
+  : buildPageHtml().replace('__MERCHANT_HOST__', MERCHANT_HOST));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const now = () => Date.now();
@@ -943,18 +995,20 @@ class Session {
     return n;
   }
 
-  async solve({ sitekey, rqdata, host, timeout }) {
+  async solve({ sitekey, rqdata, host, timeout, inject = true }) {
     this.usedAt = now();
     this.solves += 1;
 
     // frame 级答题器必须在最开头启动：challenge iframe 是 __reaSolve
     // 内部 render 之后才创建的，注入器要一直在跑才能赶上。
     // 之前放在 direct 分支之后，永远走不到（direct 会 return）。
-    const injector = setInterval(() => {
-      this.installFrameSolver().catch(() => {});
-    }, 600);
+    const injector = inject
+      ? setInterval(() => {
+          this.installFrameSolver().catch(() => {});
+        }, 600)
+      : null;
     const stopInjector = () => {
-      try { clearInterval(injector); } catch (_) {}
+      try { if (injector) clearInterval(injector); } catch (_) {}
     };
     setTimeout(stopInjector, 120000);
 
@@ -963,9 +1017,11 @@ class Session {
     try {
       const direct = await this.page.evaluate(
         (cfg) => (typeof window.__reaSolve === 'function'
-          ? window.__reaSolve(cfg.sitekey, cfg.rqdata, cfg.timeout)
+          ? window.__reaSolve(cfg.sitekey, cfg.rqdata, cfg.timeout, null, cfg.opts)
           : Promise.resolve(null)),
-        { sitekey: sitekey || DEFAULT_SITEKEY, rqdata: rqdata || '', timeout: timeout || TOKEN_TIMEOUT_MS },
+        { sitekey: sitekey || DEFAULT_SITEKEY, rqdata: rqdata || '',
+          timeout: timeout || TOKEN_TIMEOUT_MS,
+          opts: { noAuto: inject === false } },
       );
       if (direct && direct.token) {
         stopInjector();
@@ -1423,6 +1479,7 @@ const server = http.createServer(async (req, res) => {
           rqdata: body.rqdata || '',
           host: body.host || DEFAULT_HOST,
           timeout: Number(body.timeout || TOKEN_TIMEOUT_MS),
+          inject: body.inject !== false,
         });
       });
 
