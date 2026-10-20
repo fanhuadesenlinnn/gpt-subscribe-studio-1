@@ -965,3 +965,100 @@ tools/hcaptcha-solver/server.js
 ```
 
 本机 solver 已可启动并建会话，`/health` 正常。
+
+---
+
+## 十六、第十一轮：修正第十轮的错误结论 —— 是 sitekey，不是 IP 配额
+
+### 16.1 第十轮的「IP 配额」结论是错的
+
+第十轮观察到本机成功率 93% → 40% → 33%，据此推断「IP 累积配额」。
+本轮用**全新 IP** 做定量测试，直接推翻：
+
+```
+US AT&T 99.136.228.141（全新，只用 1 次）
+  sitekey c7faac4c  →  ❌ #1 出题，53.0s
+
+JP SoftBank 60.120.101.158（全新）
+  sitekey 24ed0064  →  ✅ 3/3，21.9s / 21.8s / 20.6s
+
+US 68.112.209.251（全新）
+  sitekey 24ed0064  →  ✅ 3/3，14.6s / 14.3s / 14.5s
+
+JP 118.152.143.198
+  sitekey c7faac4c  →  ❌ 2/2 出题
+```
+
+**同一个全新 IP，换个 sitekey 就从 0% 变成 100%。**
+
+### 16.2 真正的判据：sitekey
+
+| sitekey | 用途 | 服务器端直求 | 全程 |
+|---|---|---|---|
+| `24ed0064-62cf-4d42-9960-5dd1a41d4e29` | Stripe checkout 的 **passive** | ✅ 3/3、3/3 | 14–22s |
+| `c7faac4c-1cd7-4b1b-b2d4-42ba98d09c7a` | **intent_confirmation_challenge** | ❌ 0/N | 每次出图像题 |
+
+`c7faac4c` 配上真实的 264 字符 rqdata 也一样出题：
+
+```
+challenge: sitekey=c7faac4c-...
+           rqdata=264 字符
+challenge token=0  94.0s  err=execute_timeout
+  prompt=Please click on the TWO lines that are shorter
+```
+
+### 16.3 完整链路实测
+
+```
+建单          ✅ 4/4（偶发 Sentinel 失败，重试可过）
+init          ✅ 200  sitekey=24ed0064  rqdata=296
+passive 求解   ✅ 200  token=3858  25.0s
+payment_methods ✅ 200
+confirm       ✅ 200  → intent_confirmation_challenge
+                     需 c7faac4c 的 token
+challenge 求解  ❌ 出图像题
+```
+
+**passive 这一段已经完全跑通，剩下只有 `c7faac4c`。**
+
+### 16.4 为什么会这样（推断，有证据支撑）
+
+`c7faac4c` 是 Stripe 在「支付被风控拦下」时才下发的二次挑战 sitekey。
+它的设计目的就是**强制人工介入**，因此：
+
+1. 它对任何非真实交互环境都下发图像题（不看 IP、不看配额）
+2. 它的难度档位与 passive 不同（`s` 值 4 vs 4，但语义不同）
+3. 只有真实用户在真实浏览器里完成，才会放行
+
+对比：`24ed0064` 是「静默采集」，只要浏览器环境过得去就发 token，
+所以本机/服务器都能解。
+
+### 16.5 对目标的判定
+
+原目标「直接求解通过，全部协议模式」的可行边界：
+
+| 环节 | 状态 |
+|---|---|
+| 指纹注册 / init / elements / tax | ✅ 全协议 |
+| **passive hCaptcha（24ed0064）** | ✅ **全协议可解**，14–25s |
+| payment_methods | ✅ 全协议 |
+| confirm | ✅ 全协议 |
+| **challenge hCaptcha（c7faac4c）** | ❌ **纯协议不可解**，必须图像识别 |
+| poll | ✅ 全协议 |
+
+**也就是说：全协议能走到 confirm 完成，但一旦 Stripe 下发二次挑战，
+就必须靠图像题识别才能继续。**
+
+### 16.6 下一步
+
+只剩一件事：**图像题自动识别**。两条路：
+
+**A. 几何算法（已试 3 轮，不稳）**
+线条题在高频纹理背景上，像素阈值法检出率与准确率都不够。
+
+**B. 视觉模型**
+把 canvas PNG + 题干交给多模态模型，直接要坐标。
+`captureChallenge()` 已能导出 canvas，`/answer-at` 已能按坐标点击，
+**接口层面已就绪，只差一个模型**。
+
+题图样本已落盘：`/tmp/pre.png`、`/opt/gss/data/*.png`
