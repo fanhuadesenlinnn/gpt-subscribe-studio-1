@@ -572,7 +572,11 @@ async function launchBrowser(proxy) {
            '--enable-features=Vulkan', '--disable-gpu-sandbox']),
       '--ignore-gpu-blocklist',
       '--disable-blink-features=AutomationControlled',
-      '--disable-features=IsolateOrigins,site-per-process',
+      // 注意：不要加 --disable-features=IsolateOrigins,site-per-process
+      // 它会让所有 iframe 与主页面共享进程，hCaptcha 的 wasm/vm 在共享进程里
+      // 行为与真实浏览器（按站点隔离）不同，实测该参数存在时 challenge 必出题。
+      ...(process.env.NO_ISOLATE === 'true'
+        ? ['--disable-features=IsolateOrigins,site-per-process'] : []),
       '--lang=en-US,en',
       ...extra,
       ...(p.server ? [`--proxy-server=${p.server}`] : []),

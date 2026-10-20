@@ -1460,3 +1460,109 @@ window.__reaSolve = function(sk, rq, tmo) {
 **如果必须过二次挑战**，可行方案只剩：
 - 接视觉模型做图像题识别（接口已就绪）
 - 或在真实用户浏览器里完成
+
+---
+
+## 二十、第十五轮：两边失败模式不同，这是最关键的发现
+
+### 20.1 本机失败时的真面目
+
+本机 AB 页连续 8 次，失败时立刻 dump challenge frame：
+
+```
+#1 ❌ execute_timeout
+   {"canv":0,"grids":0,"imgs":0,"txt":"Please try again. ⚠️ Verify EN"}
+#2-#7 ✅ token
+#8 ❌ execute_timeout
+   {"canv":0,"grids":0,"imgs":0,"txt":"Please try again. ⚠️ Verify EN"}
+
+本机：6/8 成功
+```
+
+**本机失败是「空壳复核页」——没有 canvas、没有 9 宫格、没有 img，
+只有一句 `Please try again`。**
+
+### 20.2 服务器失败时的真面目
+
+同一时段，服务器连续 6 次同一个会话：
+
+```
+#1 ❌ Click on the TWO shortest towers
+#2 ❌ Click on the TWO shortest towers
+#3 ❌ Click on the TWO shortest towers
+#4 ❌ (空)
+#5 ❌ (空)
+#6 ❌ (空)
+
+服务器：0/6
+```
+
+**服务器失败是「真实图像题」——必须答题才能过。**
+
+### 20.3 这是本质区别
+
+```
+本机失败  =  空壳 "Please try again"  →  重试即可（6/8 最终成功）
+服务器失败 =  真实图像题              →  必须视觉识别
+```
+
+**本机从来没被要求答图像题；服务器每次都被要求。**
+
+这说明 hCaptcha 对两台机器的**风险判定等级不同**：
+- 本机：低风险 → 偶尔空壳重试 → 直接给 token
+- 服务器：高风险 → 强制图像题 → 必须真人
+
+### 20.4 本轮排除的项
+
+| 项 | 方法 | 结果 |
+|---|---|---|
+| site isolation 参数 | 移除 `--disable-features=IsolateOrigins,site-per-process` | ❌ 仍 0/6 |
+| wasm 能力 | `WebAssembly.Instance` 运算 + `crypto.subtle` AES-GCM | ✅ 两边都正常（42 / 19） |
+| 页面代码 | SIMPLE_PAGE 与 AB 页逐行相同 | ❌ 仍失败 |
+| 鼠标模拟/frame 注入/答题器 | 逐个消融 | ❌ 都不是原因 |
+| origin 域名 | test.local vs b.stripecdn.com | ❌ 都失败 |
+| TLS ja3（上轮） | 本机 375c6162... vs 服务器 0149f47e... | ⚠️ 差异存在但未证明因果 |
+
+### 20.5 十五轮后的确定结论
+
+**服务器上的能力边界**（多轮反复验证）：
+
+| sitekey | 结果 | 耗时 |
+|---|---|---|
+| `24ed0064`（passive） | ✅ **3/3、3/3、3/3，100% 成功** | 14–25s |
+| `c7faac4c`（challenge） | ❌ **0/N，100% 失败** | — |
+
+**同一台服务器、同一个 Chrome、同一时段，只换 sitekey 就从 100% 变成 0%。**
+
+这是最干净的一组对照，也说明：
+**问题不在机器，在于 `c7faac4c` 这个 sitekey 本身要求「低风险环境 + 真人交互」。**
+
+### 20.6 为什么本机能过 c7faac4c
+
+本机 AB 页在 `hcaptcha-test.local` 上 6/8 成功解 `c7faac4c`。
+但它**从来没被要求答图像题**（失败都是空壳）。
+
+推测：`hcaptcha-test.local` 这个自建 origin 在 hCaptcha 的判定里
+「没有历史风险记录」，反而被当作低风险；而服务器上的 Chrome
+因为长期高频请求，被标记为高风险。
+
+也就是说：**本机的成功依赖「干净的历史」，不可持续**。
+
+### 20.7 对目标的最终判定
+
+「全部协议模式直接求解通过」在当前条件下：
+
+| 环节 | 状态 |
+|---|---|
+| 建单 / init / elements / tax_region | ✅ |
+| **passive hCaptcha（24ed0064）** | ✅ **服务器 100% 可解** |
+| payment_methods | ✅ |
+| confirm | ✅ |
+| **challenge hCaptcha（c7faac4c）** | ❌ **服务器 0%，本机依赖干净历史** |
+| verify_challenge | ✅ 参数已就绪 |
+| poll | ✅ |
+
+**结论：全协议链路除二次挑战外全部打通且稳定。**
+二次挑战是 hCaptcha 刻意的「强制真人」闸门，纯算法十五轮未能突破。
+
+**唯一出路：图像题自动识别（视觉模型）。接口已 100% 就绪。**
