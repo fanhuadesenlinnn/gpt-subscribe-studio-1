@@ -1,4 +1,4 @@
-import { Alert, Anchor, Button, Code, CopyButton, Group, Paper, Select, Stack, Stepper, Text } from "@mantine/core";
+import { Alert, Anchor, Button, Code, CopyButton, Group, Paper, SegmentedControl, Select, Stack, Stepper, Text } from "@mantine/core";
 import { IconAlertCircle, IconCheck, IconCopy, IconExternalLink } from "@tabler/icons-react";
 import { useEffect, useRef, useState } from "react";
 
@@ -26,6 +26,7 @@ import { ResultPanel } from "../components/ResultPanel";
 import { SessionField } from "../components/SessionField";
 import { StripeCardFields, loadStripe, type StripeCardHandle } from "../card-payment/CardFields";
 import { TeamPaymentPanel } from "../components/TeamPaymentPanel";
+import { ProtocolPayPanel } from "../components/ProtocolPayPanel";
 import { randomBillingExample } from "../card-payment/billingExamples";
 import { emptyTeamCard, type TeamCardDraft } from "../card-payment/TeamCardForm";
 
@@ -58,6 +59,8 @@ export function OrderNew({ onRecord }: Props) {
   const [promoBusy, setPromoBusy] = useState(false);
   const [promoError, setPromoError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // 支付路径：protocol = 全协议（服务端直接打 Stripe），browser = 浏览器 Stripe.js / 托管长链
+  const [payMode, setPayMode] = useState<"browser" | "protocol">("browser");
   const hosted = order ? isHostedOrder(order) : plan === "team";
   const teamOrder = (order?.plan ?? plan) === "team";
   // Team 托管结账只要拿到 Stripe 公钥，就能和 Plus 一样站内填卡支付；
@@ -329,7 +332,9 @@ export function OrderNew({ onRecord }: Props) {
       {error}
     </Alert>
   ) : null;
-  const primaryAction = step < 2 ? (
+  // 全协议模式在 step 1 由 ProtocolPayPanel 自带按钮，底部不再重复一个「确认支付」
+  const protocolStep = payMode === "protocol" && step === 1;
+  const primaryAction = step < 2 && !protocolStep ? (
     <Group mt={teamOrder ? "xs" : "md"} justify="flex-end">
       <Button type="submit" size="md" loading={busy}
         disabled={Boolean(order && !linkOnly && !teamOrder && !card)} fullWidth={teamOrder}>
@@ -350,6 +355,20 @@ export function OrderNew({ onRecord }: Props) {
             <Stepper.Step label={linkOnly ? "长链支付" : "填卡支付"} description={linkOnly ? "打开链接付款" : "地址与卡片"} />
             <Stepper.Step label="结果" description="成功或失败" />
           </Stepper>
+
+          {step < 2 && !linkOnly && (
+            <SegmentedControl
+              fullWidth
+              mb="lg"
+              value={payMode}
+              onChange={(value) => setPayMode(value as "browser" | "protocol")}
+              disabled={busy || Boolean(order)}
+              data={[
+                { value: "browser", label: "浏览器模式（Stripe.js）" },
+                { value: "protocol", label: "全协议模式（无浏览器）" },
+              ]}
+            />
+          )}
 
           {step === 0 && (
             <Stack gap={teamOrder ? "md" : "lg"}>
@@ -486,7 +505,32 @@ export function OrderNew({ onRecord }: Props) {
             </Stack>
           )}
 
-          {step === 1 && order && !teamOrder && !linkOnly && addr && (
+          {step === 1 && order && payMode === "protocol" && (
+            <ProtocolPayPanel
+              orderId={order.id}
+              country={order.billing_country || country}
+              disabled={busy}
+              onDone={(out) => {
+                // 协议层结果不是订单状态，拉一次订单让页面走到结果页/继续
+                void (async () => {
+                  const latest = await getOrder(order.id).catch(() => null);
+                  if (latest) setOrder(latest);
+                  if (out.state === "paid" || out.state === "card_declined") {
+                    finish({
+                      ...(latest ?? order),
+                      status: out.state === "paid" ? "active" : "failed",
+                      last_error:
+                        out.state === "card_declined"
+                          ? [out.code, out.decline_code, out.message].filter(Boolean).join(" / ")
+                          : null,
+                    });
+                  }
+                })();
+              }}
+            />
+          )}
+
+          {step === 1 && order && payMode === "browser" && !teamOrder && !linkOnly && addr && (
             <Stack gap="lg">
               {hosted && (
                 <Alert color="blue" variant="light">

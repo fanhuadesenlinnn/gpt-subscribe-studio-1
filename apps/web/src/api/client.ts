@@ -208,6 +208,38 @@ export async function verifyOrder(orderId: string, paid = false): Promise<Order>
   return (await res.json()) as Order;
 }
 
+export interface ProtocolPayResult {
+  state: string;
+  code?: string | null;
+  decline_code?: string | null;
+  message?: string | null;
+  intent_status?: string | null;
+  charge_id?: string | null;
+  payment_method_id?: string | null;
+}
+
+export interface ProtocolPayInput {
+  card: { number: string; cvc: string; exp_month: string; exp_year: string };
+  billing: BillingInput;
+  proxy?: string;
+}
+
+/**
+ * 全协议模式：服务端直接和 Stripe 对话，不加载任何 Stripe.js、不开浏览器。
+ * 卡号只在这一次请求里使用，服务端不落库、不打日志。
+ * 链路较长（指纹注册 → init → elements → tax → hCaptcha → pm → confirm → poll），
+ * 单次可能要 60–180 秒，所以这里给 5 分钟上限。
+ */
+export async function payProtocol(orderId: string, input: ProtocolPayInput): Promise<ProtocolPayResult> {
+  const res = await fetchWithDeadline(`/api/orders/${orderId}/pay-protocol`, {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify(input),
+  }, 300000, "协议支付超时（服务端仍在跑，请稍后查询订单状态）");
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()) as ProtocolPayResult;
+}
+
 const ZERO_DECIMAL = new Set(["BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW", "MGA", "PYG", "RWF", "UGX", "VND", "VUV", "XAF", "XOF", "XPF"]);
 
 export function formatAmount(amount?: string | null, currency?: string | null): string | null {

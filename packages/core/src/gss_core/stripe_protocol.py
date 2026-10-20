@@ -158,6 +158,7 @@ class StripeProtocol:
         # solver 会话：passive 与 challenge 必须同一浏览器 + 同一出口 IP
         self._solver_session = ""
         self._solver_ua = ""
+        self._email_cache = ""
         self._solver_url = os.environ.get("HCAPTCHA_SOLVER_URL", "").rstrip("/")
 
     def rotate_proxy_sid(self) -> str:
@@ -368,6 +369,22 @@ class StripeProtocol:
         return Fingerprint(guid=guid, muid=muid, sid=sid,
                            client_session_id=str(uuid.uuid4()))
 
+    def _fallback_email(self) -> str:
+        """账单没填邮箱时的兜底。
+
+        Stripe hosted checkout 的 confirm 必须有 email，
+        否则 error.code=checkout_confirm_error、reason=checkout_email_missing。
+        卡主真实邮箱由调用方传入；这里造一个与该账单姓名/地址一致的占位地址，
+        避免整单因为少一个字段直接 400。
+        """
+        if self._email_cache:
+            return self._email_cache
+        name = (self.billing.get("name") or "cardholder").strip().lower()
+        slug = re.sub(r"[^a-z0-9]+", ".", name).strip(".") or "cardholder"
+        self._email_cache = f"{slug}.{os.urandom(3).hex()}@gmail.com"
+        log(f"   账单缺邮箱，使用占位邮箱 {self._email_cache}")
+        return self._email_cache
+
     @staticmethod
     def _make_rv_timestamp() -> str:
         """生成 Stripe 的 rv_timestamp。
@@ -380,13 +397,46 @@ class StripeProtocol:
         return "".join(random.choice(alphabet) for _ in range(212))
 
 
-    def _align_locale(self, proxy: str | None) -> tuple[str, str]:
-        """查询代理 IP 的地理位置，返回 (locale, timezone)。
+    # 常用国家 → (locale, timezone)。代理是住宅池，同一 SID 也可能落到别的国家，
+    # 若以 IP 地理为准，会出现「账单 US + 时区 America/Caracas」的矛盾组合，
+    # Stripe 会据此加验证。所以 locale/时区一律以账单国家为准。
+    _LOCALE_BY_COUNTRY = {
+        "US": ("en-US", "America/New_York"),
+        "CA": ("en-CA", "America/Toronto"),
+        "GB": ("en-GB", "Europe/London"),
+        "JP": ("ja-JP", "Asia/Tokyo"),
+        "KR": ("ko-KR", "Asia/Seoul"),
+        "SG": ("en-SG", "Asia/Singapore"),
+        "AU": ("en-AU", "Australia/Sydney"),
+        "DE": ("de-DE", "Europe/Berlin"),
+        "FR": ("fr-FR", "Europe/Paris"),
+        "NL": ("nl-NL", "Europe/Amsterdam"),
+        "BR": ("pt-BR", "America/Sao_Paulo"),
+        "MX": ("es-MX", "America/Mexico_City"),
+        "CL": ("es-CL", "America/Santiago"),
+        "TR": ("tr-TR", "Europe/Istanbul"),
+        "IN": ("en-IN", "Asia/Kolkata"),
+        "ID": ("id-ID", "Asia/Jakarta"),
+        "VN": ("vi-VN", "Asia/Ho_Chi_Minh"),
+        "TH": ("th-TH", "Asia/Bangkok"),
+        "MY": ("ms-MY", "Asia/Kuala_Lumpur"),
+        "PH": ("en-PH", "Asia/Manila"),
+        "EG": ("en-EG", "Africa/Cairo"),
+    }
 
-        时区必须与出口 IP 一致，否则 Stripe 判定环境矛盾。
+    def _align_locale(self, proxy: str | None) -> tuple[str, str]:
+        """返回 (locale, timezone)，以账单国家为准。
+
+        只做一件事：查出口 IP 供日志留痕，并在出口国家与账单国家不一致时告警。
+        locale/timezone 不再跟随 IP——住宅池会漂移，跟着漂会制造矛盾指纹。
         """
+        country = (self.billing.get("country") or "US").upper()
+        locale, tz = self._LOCALE_BY_COUNTRY.get(country, ("en-US", "America/New_York"))
+
         if not proxy:
-            return "en-US", "America/New_York"
+            log(f"   无代理，locale={locale} tz={tz}（按账单国 {country}）")
+            return locale, tz
+
         try:
             with httpx.Client(proxy=proxy, timeout=15) as c:
                 r = c.get(
@@ -395,16 +445,16 @@ class StripeProtocol:
                 )
                 j = r.json()
                 if j.get("status") == "success":
-                    cc = (j.get("countryCode") or "US").upper()
-                    tz = j.get("timezone") or "America/New_York"
-                    locale = "en-US" if cc == "US" else f"{cc.lower()}-{cc}"
-                    self._geo = {"country": cc, "timezone": tz,
+                    cc = (j.get("countryCode") or "").upper()
+                    self._geo = {"country": cc, "timezone": j.get("timezone") or "",
                                  "region": j.get("regionName")}
-                    log(f"   IP 地理位置: {cc} {tz}")
-                    return locale, tz
+                    if cc and cc != country:
+                        log(f"   ⚠ 出口 {cc} ≠ 账单 {country}（locale 仍按账单国）")
+                    else:
+                        log(f"   出口 {cc} 与账单国一致，locale={locale} tz={tz}")
         except Exception as e:
-            log(f"   地理位置查询失败: {str(e)[:60]}")
-        return "en-US", "America/New_York"
+            log(f"   出口地理查询失败（不影响流程）: {str(e)[:60]}")
+        return locale, tz
 
     # ── ② init ──────────────────────────────────────────────
     def fetch_allowed_origins(self) -> dict[str, Any]:
@@ -710,7 +760,10 @@ class StripeProtocol:
         b = self.billing
         data = {
             "billing_details[name]": b.get("name", ""),
-            "billing_details[email]": b.get("email", ""),
+            # hosted checkout 的 confirm 会校验 email 是否已绑定到 PaymentMethod，
+            # 缺了会返回 400 checkout_confirm_error / reason=checkout_email_missing。
+            # email 只能挂在 billing_details 上，不能作为 confirm 的顶层参数。
+            "billing_details[email]": (b.get("email") or "").strip() or self._fallback_email(),
             "billing_details[address][country]": b.get("country", "US"),
             "billing_details[address][line1]": b.get("line1", ""),
             "billing_details[address][city]": b.get("city", ""),
@@ -881,8 +934,13 @@ class StripeProtocol:
         scan(poll)
 
         status = (out.intent_status or "").lower()
+        # confirm 阶段的参数级错误（缺邮箱、config 过期等）不是拒卡，
+        # 单列一个 state，否则会被误当成「已到发卡行」。
+        confirm_status = int((confirm or {}).get("status") or 0)
         if status in ("succeeded", "requires_capture"):
             out.state = "paid"
+        elif out.code == "checkout_confirm_error" or confirm_status == 400:
+            out.state = "confirm_error"
         elif out.decline_code or out.code:
             if "captcha" in (out.message or "").lower():
                 out.state = "captcha_rejected"
@@ -890,8 +948,10 @@ class StripeProtocol:
                 out.state = "card_declined"
         elif status == "requires_action":
             out.state = "challenge_required"
-        elif (poll or {}).get("state") == "failed":
+        elif (poll or {}).get("state") in ("failed",):
             out.state = "card_declined"
+        elif (poll or {}).get("state") == "succeeded":
+            out.state = "paid"
         out.raw = {"confirm": confirm, "poll": poll}
         return out
 

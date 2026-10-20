@@ -166,39 +166,42 @@ curl http://127.0.0.1:8080/api/orders
 
 这样可以在不依赖真实上游服务的情况下测试完整流程。
 
-## 生产部署（Docker Compose）
+## 生产部署（systemd，无 Docker）
 
-### 1. 构建镜像
+线上跑的是 venv + systemd，不是容器。完整布局、单元文件、发布步骤见
+[`deploy/README.md`](../deploy/README.md)。
 
-```bash
-cd deploy
-docker compose build
-```
-
-### 2. 启动服务
+三个单元：
 
 ```bash
-# 启动所有服务
-docker compose up -d
-
-# 查看日志
-docker compose logs -f
-
-# 查看服务状态
-docker compose ps
+systemctl status gss-api gss-solver gss-window xvfb
 ```
 
-### 3. 健康检查
+发布：
 
 ```bash
-curl http://127.0.0.1:8080/api/health
+# 后端
+rsync -az --exclude '.venv' --exclude '__pycache__' packages/ services/ root@HOST:/opt/gss/app/
+ssh root@HOST 'systemctl restart gss-api'
+
+# 前端
+cd apps/web && npm run build && rsync -az --delete dist/ root@HOST:/opt/gss/app/web/
+
+# solver（改完必须先杀旧进程，否则 8199 被占）
+scp tools/hcaptcha-solver/server.js root@HOST:/opt/gss/tools/hcaptcha-solver/
+ssh root@HOST 'pkill -f "node server.js"; systemctl restart gss-solver'
 ```
 
-### 4. 停止服务
+健康检查：
 
 ```bash
-docker compose down
+curl -s http://127.0.0.1:8199/health
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18120/login
 ```
+
+> 早期的 `deploy/docker-compose.yml`、`deploy/server/compose.yml`、`Dockerfile` 已删除。
+> solver 需要 Chrome + Xvfb，容器里再叠 shm/seccomp 参数反而更难调；
+> 探针脚本要频繁改，跑在宿主机上直接改直接生效。
 
 ## 核心工作流
 
@@ -265,11 +268,15 @@ A: SQLite 数据库文件位于 `data/gss.db`（可通过 `GSS_DB_PATH` 配置�
 A: 所有日志都经过脱敏处理。查看方式：
 
 ```bash
-# API 服务日志
-docker compose logs -f api
+# API 服务
+journalctl -u gss-api -f
+tail -f /opt/gss/logs/api.err.log
 
-# Worker 日志
-docker compose logs -f worker
+# hCaptcha solver
+tail -f /opt/gss/logs/solver.log
+
+# 轮转调度器
+tail -f /opt/gss/logs/window.log
 ```
 
 ### Q: 测试全部通过代表什么？
@@ -305,14 +312,16 @@ A: 50 个测试通过意味着：
 
 ## 服务器部署（`deploy/server`）
 
-`deploy/server/compose.yml` 不含任何域名或路径，部署时用环境变量指定：
+`deploy/server/app.py` 是入口（uvicorn 直接指向它）；`/opt/gss/app/.env` 不含任何域名硬编码：
 
 | 变量 | 说明 |
 |---|---|
-| `GSS_RELEASE` | 镜像标签（必填），例如构建时间戳 |
-| `GSS_PRIVATE_DIR` | 存放 `container-auth.json`（访问密码）和 `proxy-config/` 的目录（必填，不要放进仓库） |
-| `GSS_COMPOSE_PROJECT` | compose 项目名，默认 `gpt-subscribe-studio` |
-| `GSS_PUBLIC_ORIGIN` | 选填，例如 `https://你的域名`。不填时按「请求 Origin 与 Host 同源」校验，部署到任何域名都能用 |
+| `GSS_DATA_DIR` | 数据目录，线上是 `/opt/gss/data` |
+| `GSS_CONFIG_DIR` | 配置目录，线上是 `/opt/gss/config`（放 `container-auth.json`、`proxy-gateways.json`） |
+| `GSS_AUTH_FILE` | 登录口令文件路径 |
+| `GSS_WEB_DIR` | 前端构建产物目录，线上是 `/opt/gss/app/web` |
+| `GSS_PUBLIC_ORIGIN` | 你的域名，例如 `https://<PAY_HOST>`。不填时按「请求 Origin 与 Host 同源」校验 |
+| `HCAPTCHA_SOLVER_URL` | solver 地址，默认 `http://127.0.0.1:8199` |
 
 ---
 
@@ -407,22 +416,3 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now xvfb hcaptcha-solver
 ```
 
-### Docker（可选）
-
-如果偏好容器：
-
-```yaml
-services:
-  solver:
-    build:
-      context: ./tools/hcaptcha-solver
-      dockerfile: Dockerfile
-    ports:
-      - "127.0.0.1:8199:8199"
-    shm_size: 1gb
-    security_opt:
-      - seccomp:unconfined
-    restart: unless-stopped
-```
-
-需要配套的 `Dockerfile`（自带 Chrome + Xvfb）。
