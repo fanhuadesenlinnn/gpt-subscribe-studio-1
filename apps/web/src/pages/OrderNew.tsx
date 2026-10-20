@@ -347,7 +347,9 @@ export function OrderNew({ onRecord }: Props) {
       </Button>
     </Group>
   ) : null;
-  const showTeamPayment = teamOrder && step < 2;
+  // 双栏（配置 | 支付面板）只用于浏览器模式的 Team 二次确认；
+  // 全协议模式是单栏居中，否则卡片输入区会被挤到右侧窄栏。
+  const showTeamPayment = teamOrder && step < 2 && payMode === "browser";
 
   return (
     <form onSubmit={submit}>
@@ -367,8 +369,8 @@ export function OrderNew({ onRecord }: Props) {
               onChange={(value) => setPayMode(value as "browser" | "protocol")}
               disabled={busy || Boolean(order)}
               data={[
-                { value: "browser", label: "浏览器模式（Stripe.js）" },
-                { value: "protocol", label: "全协议模式（无浏览器）" },
+                { value: "browser", label: "官方结账流（站内填卡）" },
+                { value: "protocol", label: "协议支付（可选 Stripe 输入框 / 纯协议）" },
               ]}
             />
           )}
@@ -595,14 +597,25 @@ export function OrderNew({ onRecord }: Props) {
 
         {showTeamPayment && (
           <div className="order-payment">
-            <TeamPaymentPanel card={teamCard} onCard={setTeamCard}
-              billing={teamBilling} onBilling={setTeamBilling} order={order} busy={busy}
-              onExample={() => {
-                const example = randomBillingExample(teamBilling);
-                setTeamBilling(example); setTeamExample(example); setError(null);
-              }}
-              hasExample={Boolean(teamExample)}
-              footer={<>{errorAlert}{primaryAction}</>} />
+            {order ? (
+              <TeamPaymentPanel card={teamCard} onCard={setTeamCard}
+                billing={teamBilling} onBilling={setTeamBilling} order={order} busy={busy}
+                onExample={() => {
+                  const example = randomBillingExample(teamBilling);
+                  setTeamBilling(example); setTeamExample(example); setError(null);
+                }}
+                hasExample={Boolean(teamExample)}
+                footer={<>{errorAlert}{primaryAction}</>} />
+            ) : (
+              <Paper withBorder p="lg" radius="md">
+                <Stack gap="sm">
+                  <Text fw={600}>先生成结账，再填卡</Text>
+                  <Text size="sm" c="dimmed">
+                    点左侧「生成 Team 结账链接」后，这里会显示应付金额，然后再填卡片和账单地址。
+                  </Text>
+                </Stack>
+              </Paper>
+            )}
           </div>
         )}
 

@@ -7,7 +7,7 @@ import {
   Paper,
   PasswordInput,
   SimpleGrid,
-  SegmentedControl,
+  Radio,
   Stack,
   Text,
   Textarea,
@@ -40,6 +40,8 @@ interface Props {
   /** 重新向 Stripe 读一次金额（报价超时会用） */
   onRefreshQuote?: () => Promise<void> | void;
 }
+
+type PmMode = "server" | "stripe";
 
 interface CardDraft {
   number: string;
@@ -100,6 +102,40 @@ function describe(result: ProtocolPayResult) {
   }
 }
 
+/** 两张可选的模式卡片：选中带边框与勾选，和 Mantine 的 Radio.Card 一致。 */
+function ModeCard({
+  value, pmMode, busy, title, hint, detail,
+}: {
+  value: PmMode;
+  pmMode: PmMode;
+  busy: boolean;
+  title: string;
+  hint: string;
+  detail: string;
+}) {
+  const active = pmMode === value;
+  return (
+    <Radio.Card value={value} radius="md" p="md" disabled={busy}
+      style={{
+        borderColor: active ? "var(--mantine-color-blue-6)" : undefined,
+        borderWidth: active ? 2 : 1,
+        background: active ? "var(--mantine-color-blue-0)" : undefined,
+      }}>
+      <Group wrap="nowrap" align="flex-start" gap="xs">
+        <Radio.Indicator mt={2} />
+        <div>
+          <Group gap={6} wrap="nowrap">
+            <Text fw={600} size="sm">{title}</Text>
+            {active && <Badge size="xs" variant="filled">已选</Badge>}
+          </Group>
+          <Text size="xs" c="dimmed" mt={2}>{hint}</Text>
+          <Text size="xs" c="dimmed" mt={6}>{detail}</Text>
+        </div>
+      </Group>
+    </Radio.Card>
+  );
+}
+
 const STEPS = [
   { title: "指纹注册", description: "m.stripe.com/6 × 4 → guid/muid/sid" },
   { title: "init", description: "取金额、hCaptcha sitekey 与 rqdata" },
@@ -125,7 +161,7 @@ export function ProtocolPayPanel({
   const [proxy, setProxy] = useState("");
   const [busy, setBusy] = useState(false);
   // 取 pm_ 的方式：server = 服务端提交卡号；stripe = 浏览器 Stripe 输入框
-  const [pmMode, setPmMode] = useState<"server" | "stripe">("server");
+  const [pmMode, setPmMode] = useState<PmMode>("stripe");
   const [stripeCard, setStripeCard] = useState<StripeCardHandle | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ProtocolPayResult | null>(null);
@@ -205,7 +241,7 @@ export function ProtocolPayPanel({
   const price = formatAmount(amount, currency);
 
   return (
-    <Stack gap="md">
+    <Stack gap="md" maw={720} mx="auto">
       {/* 金额放最上面：确认支付之前先让人看清要付多少 */}
       <Paper withBorder p="lg" radius="md" className="protocol-amount">
         <Group justify="space-between" align="flex-end" wrap="nowrap">
@@ -248,48 +284,30 @@ export function ProtocolPayPanel({
         )}
       </Paper>
 
-      <Alert color="blue" variant="light" icon={<IconAlertCircle size={18} />} title="全协议模式（无浏览器）">
-        服务端直接用 HTTP 和 Stripe 对话：不加载 Stripe.js、不弹 iframe、不需要你点验证框。
-        卡号只在这一次请求里使用，服务端不写库、不打日志。
-        单次耗时约 60–180 秒，中途别关页面。
+      <Alert color="blue" variant="light" icon={<IconAlertCircle size={18} />} title="协议链路（两种取 pm_ 的方式）">
+        无论选哪种，Stripe 侧都是服务端按真实浏览器时序跑完：
+        指纹注册 → init → elements/sessions → tax_region → hCaptcha → confirm → poll。
+        两种方式只差在「卡号从哪进入 Stripe」，耗时约 60–180 秒，中途别关页面。
       </Alert>
 
       <Paper withBorder p="md" radius="md">
         <Stack gap="sm">
-          <Text fw={600}>取 payment_method 的方式</Text>
-          <SegmentedControl
-            fullWidth
-            value={pmMode}
-            onChange={(value) => setPmMode(value as "server" | "stripe")}
-            disabled={busy}
-            data={[
-              { value: "server", label: "服务端提交卡号" },
-              { value: "stripe", label: "Stripe 输入框（更接近真人）" },
-            ]}
-          />
+          <Text fw={600}>卡号怎么提交</Text>
+          <Radio.Group value={pmMode} onChange={(value) => setPmMode(value as PmMode)}>
+            <SimpleGrid cols={{ base: 1, xs: 2 }} spacing="sm">
+              <ModeCard value="stripe" pmMode={pmMode} busy={busy}
+                title="Stripe 输入框"
+                hint="iframe 内输卡，最接近真人"
+                detail="卡号只进入 Stripe 的 iframe，浏览器直接换 pm_。指纹、Radar 信号与真实用户一致。" />
+              <ModeCard value="server" pmMode={pmMode} busy={busy}
+                title="纯协议提交"
+                hint="服务端直连，无需 iframe"
+                detail="卡号发到本服务，由服务端调 Stripe 换 pm_。可批量、无人值守。" />
+            </SimpleGrid>
+          </Radio.Group>
 
-          {pmMode === "server" ? (
+          {pmMode === "stripe" ? (
             <>
-              <Text size="xs" c="dimmed">
-                卡号直接发给本服务，由服务端调用 Stripe 换 pm_。最快，但缺 Stripe.js 侧的环境信号。
-              </Text>
-              <TextInput label="卡号" value={card.number} onChange={changeCard("number")}
-                inputMode="numeric" autoComplete="off" disabled={busy} placeholder="4242424242424242" />
-              <SimpleGrid cols={{ base: 1, xs: 3 }}>
-                <TextInput label="到期月份" placeholder="MM" value={card.exp_month}
-                  onChange={changeCard("exp_month")} inputMode="numeric" maxLength={2} disabled={busy} />
-                <TextInput label="到期年份" placeholder="YYYY" value={card.exp_year}
-                  onChange={changeCard("exp_year")} inputMode="numeric" maxLength={4} disabled={busy} />
-                <PasswordInput label="CVC" value={card.cvc} onChange={changeCard("cvc")}
-                  inputMode="numeric" maxLength={4} disabled={busy} />
-              </SimpleGrid>
-            </>
-          ) : (
-            <>
-              <Text size="xs" c="dimmed">
-                卡号在 Stripe 自己的 iframe 里输入并换 pm_，本站服务端拿不到卡号。
-                浏览器指纹、Radar 信号与真实用户一致，hCaptcha 更容易放过。
-              </Text>
               {publishableKey ? (
                 <StripeCardFields
                   publishableKey={publishableKey}
@@ -302,10 +320,23 @@ export function ProtocolPayPanel({
                 />
               ) : (
                 <Alert color="orange" variant="light" icon={<IconAlertCircle size={16} />}>
-                  这个订单没有 publishable_key，无法挂载 Stripe 输入框。
-                  请回到第 1 步重新创建结账，或改用「服务端提交卡号」。
+                  这个订单没有 publishable_key，挂不了 Stripe 输入框。
+                  请回第 1 步重建结账，或改用「纯协议提交」。
                 </Alert>
               )}
+            </>
+          ) : (
+            <>
+              <TextInput label="卡号" value={card.number} onChange={changeCard("number")}
+                inputMode="numeric" autoComplete="off" disabled={busy} placeholder="4242424242424242" />
+              <SimpleGrid cols={{ base: 1, xs: 3 }}>
+                <TextInput label="到期月份" placeholder="MM" value={card.exp_month}
+                  onChange={changeCard("exp_month")} inputMode="numeric" maxLength={2} disabled={busy} />
+                <TextInput label="到期年份" placeholder="YYYY" value={card.exp_year}
+                  onChange={changeCard("exp_year")} inputMode="numeric" maxLength={4} disabled={busy} />
+                <PasswordInput label="CVC" value={card.cvc} onChange={changeCard("cvc")}
+                  inputMode="numeric" maxLength={4} disabled={busy} />
+              </SimpleGrid>
             </>
           )}
         </Stack>

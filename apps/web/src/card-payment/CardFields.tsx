@@ -108,7 +108,10 @@ export function StripeCardFields({
         paymentEl = elements.create("payment", {
           layout: "tabs",
           wallets: { applePay: "never", googlePay: "never" },
-          ...(requirePaymentMethod ? { fields: { billingDetails: "never" } } : {}),
+          // 不要设 fields.billingDetails="never"：那会让 Stripe 要求
+          // createPaymentMethod 里补齐 name/email/phone/address，
+          // phone 是 Link 才需要的字段，卡片流程并不采集它。
+          // 保持默认（auto），Element 自己收账单信息，我们只取 pm_。
         });
         paymentEl.mount(`#${targetId}`);
         setHint("卡片由 Stripe 托管输入，不会发到本站。");
