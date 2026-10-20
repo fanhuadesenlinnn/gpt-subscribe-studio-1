@@ -1062,3 +1062,151 @@ challenge 求解  ❌ 出图像题
 **接口层面已就绪，只差一个模型**。
 
 题图样本已落盘：`/tmp/pre.png`、`/opt/gss/data/*.png`
+
+---
+
+## 十七、第十二轮：确认视觉模型是唯一可靠解法
+
+### 17.1 检查可用的外部能力
+
+```
+环境变量（本机 + 服务器）  无 openai / anthropic / xai / gemini 等模型 key
+YesCaptcha 余额            0
+```
+
+**没有任何可用的多模态模型或打码服务。**
+
+### 17.2 几何算法第四版：有进展但仍不可靠
+
+本轮改进点：
+
+```python
+# 线条两类颜色特征
+neutral = (|r-g|<20) & (|g-b|<20) & (lum>100)      # 白线
+pinkish = (r-g>8) & (b-g>0) & (lum>70)              # 粉线
+cand = neutral | pinkish
+
+# 形状筛选（排除石头/反光块）
+thick = area / arc；thick > 22 → 丢弃
+
+# ★ 关键修正：曲线线条的质心不在线上
+mid = (proj.max() + proj.min()) / 2
+pt_on_line = pts[argmin(|proj - mid|)]     # 取主轴中点的实际像素
+```
+
+**结果**：
+
+```
+检出 5 个连通域（数量正确）
+P1 = (267, 237)  落在粉色曲线上 ✅
+P2 = (145, 273)  落在石头上     ❌
+```
+
+四版算法对比：
+
+| 版本 | 方法 | 检出数 | 正确率 |
+|---|---|---|---|
+| v1 | 亮度+低饱和连通域 | 13（噪声） | 0/2 |
+| v2 | V>165&S<95+细长 | 5 | 0/2 |
+| v3 | 暖色(r>=g)+PCA | 9 | 0/2 |
+| **v4** | **中性色+粉调+主轴中点** | **5** | **1/2** |
+
+**v4 是唯一让点击落在真线上的版本，但仍不稳定。**
+
+### 17.3 几何路线的结构性困难
+
+hCaptcha 的线条题有三重干扰：
+
+1. **高频纹理背景**（丛林/瀑布/水波），与线条的局部对比度接近
+2. **线条是半透明曲线**，与背景混合，边缘不锐利
+3. **每次背景随机**，无法用模板或背景差分
+4. **「较短」是相对判断**，需要同时正确检出全部 5–6 条并比较
+
+第 4 点最致命：只要漏检一条，最短两条就可能选错。
+
+### 17.4 结论：必须接视觉模型
+
+接口层已 **100% 就绪**：
+
+```
+captureChallenge()    → canvas PNG（含 dataUrl）        ✅
+/shoot                → challenge iframe 截图            ✅
+/frames               → 题干文字 + 单元格坐标             ✅
+answerChallengeAt()   → 按归一化坐标点击                  ✅
+answerChallenge()     → 按 9 宫格索引点击                 ✅
+solve-then-answer     → 出题+截图一次完成                 ✅
+```
+
+**只缺一个「看图给坐标」的模型。**
+
+接入点极简（伪代码）：
+
+```js
+// 在 challenge frame 内、execute 生命周期中
+const cv = document.querySelector('canvas');
+const png = cv.toDataURL('image/png');
+
+// 交给模型（示例：OpenAI 兼容的 chat/completions）
+const r = await fetch(MODEL_ENDPOINT, {
+  method: 'POST',
+  headers: { 'Authorization': 'Bearer ' + API_KEY, 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    model: MODEL_NAME,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text',
+          text: `题干：${prompt}。返回需要点击的位置，格式 [[x,y],...]，坐标是 0-1 归一化。只输出 JSON。` },
+        { type: 'image_url', image_url: { url: png } },
+      ],
+    }],
+  }),
+});
+const coords = JSON.parse(r.choices[0].message.content);
+// 直接点击
+clickAt(coords);
+```
+
+**9 宫格题同理**：把 9 张图拼成一张，问「哪几个格子符合题干」，返回索引。
+
+### 17.5 当前完整的可行边界（最终结论）
+
+| 环节 | 纯协议 | 备注 |
+|---|---|---|
+| 建单 / init / elements / tax_region | ✅ | 完全可用 |
+| **passive hCaptcha (24ed0064)** | ✅ | **14–25s 稳定出 token** |
+| payment_methods | ✅ | 完全可用 |
+| confirm | ✅ | 完全可用 |
+| **challenge hCaptcha (c7faac4c)** | ❌ | **必须视觉模型** |
+| verify_challenge | ✅ | 参数已对齐，等 token |
+| poll | ✅ | 完全可用 |
+
+**除二次挑战外，全链路已达"全协议"。**
+二次挑战这一环是 hCaptcha 刻意设计的「必须真人」环节，
+纯几何算法无法稳定突破，视觉模型是唯一出路。
+
+### 17.6 工具落地清单
+
+```
+tools/hcaptcha-solver/server.js
+  跨平台 Chrome 路径、merchant/loopback 双模式
+  /session /solve /shoot /frames /frame-log /answer-at /solve-then-answer /eval /health
+  页面内自动答题器（9宫格 skip + v4 线条检测）
+  每次求解前清理 widget
+
+tools/rea-chrome/
+  open_debug_chrome.cjs   可调试 Chrome（CDP 9222）
+  cdp.cjs                 极简 CDP 客户端
+  recorder2.cjs           OOPIF 全量记录器
+  solve_hcaptcha.cjs      直接求解工具
+  ip_ab_test.cjs          出口 IP 对照实验台
+  local_proxy.cjs         本地转发代理
+
+scripts/
+  quota_test.py           单 IP 定量配额测试
+  e2e_passive_only.py     passive-only 端到端
+  e2e_real_challenge.py   真实 challenge rqdata 端到端
+  flow2.py                出题+截图 / 作答两段式
+  answer_flow.py          同上（旧版）
+  sid_sweep.py            出口枚举
+```
