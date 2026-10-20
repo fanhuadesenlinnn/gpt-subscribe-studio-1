@@ -7,6 +7,7 @@ import {
   Paper,
   PasswordInput,
   SimpleGrid,
+  SegmentedControl,
   Stack,
   Text,
   Textarea,
@@ -15,6 +16,8 @@ import {
 } from "@mantine/core";
 import { IconAlertCircle, IconCheck, IconClock, IconX } from "@tabler/icons-react";
 import { useState } from "react";
+
+import { StripeCardFields, type StripeCardHandle } from "../card-payment/CardFields";
 
 import { formatAmount, payProtocol, type BillingInput, type ProtocolPayResult } from "../api/client";
 import { randomBillingExample } from "../card-payment/billingExamples";
@@ -29,6 +32,9 @@ interface Props {
   quotationError?: string | null;
   /** 本轮实际使用的出口（只显示国家与 ISP，不显示账号密码） */
   exitLabel?: string;
+  /** Stripe 公钥；有它才能挂载 Stripe 输入框 */
+  publishableKey?: string | null;
+  checkoutUrl?: string | null;
   disabled?: boolean;
   onDone?: (result: ProtocolPayResult) => void;
   /** 重新向 Stripe 读一次金额（报价超时会用） */
@@ -105,8 +111,8 @@ const STEPS = [
 ];
 
 export function ProtocolPayPanel({
-  orderId, country, amount, currency, quotationError, exitLabel, disabled, onDone,
-  onRefreshQuote,
+  orderId, country, amount, currency, quotationError, exitLabel, publishableKey,
+  checkoutUrl, disabled, onDone, onRefreshQuote,
 }: Props) {
   const [card, setCard] = useState<CardDraft>(EMPTY_CARD);
   const [billing, setBilling] = useState<BillingInput>(() => {
@@ -118,6 +124,9 @@ export function ProtocolPayPanel({
   });
   const [proxy, setProxy] = useState("");
   const [busy, setBusy] = useState(false);
+  // 取 pm_ 的方式：server = 服务端提交卡号；stripe = 浏览器 Stripe 输入框
+  const [pmMode, setPmMode] = useState<"server" | "stripe">("server");
+  const [stripeCard, setStripeCard] = useState<StripeCardHandle | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ProtocolPayResult | null>(null);
 
@@ -130,26 +139,62 @@ export function ProtocolPayPanel({
     setError(null);
     setResult(null);
 
-    const number = card.number.replace(/[\s-]/g, "");
-    if (!/^\d{12,19}$/.test(number)) return setError("卡号格式不对（12–19 位数字）。");
-    if (!/^\d{3,4}$/.test(card.cvc)) return setError("CVC 格式不对（3–4 位）。");
-    if (!/^\d{1,2}$/.test(card.exp_month)) return setError("到期月份填 MM。");
-    if (!/^\d{2}$|^\d{4}$/.test(card.exp_year)) return setError("到期年份填 YY 或 YYYY。");
     if (!billing.name.trim() || !billing.line1.trim() || !billing.city.trim() || !billing.postal_code.trim()) {
       return setError("账单地址要填全：姓名、街道、城市、邮编。");
     }
 
+    const payloadBilling = { ...billing, country: (billing.country || "US").toUpperCase() };
+
+    // 分支一：服务端提交卡号
+    if (pmMode === "server") {
+      const number = card.number.replace(/[\s-]/g, "");
+      if (!/^\d{12,19}$/.test(number)) return setError("卡号格式不对（12–19 位数字）。");
+      if (!/^\d{3,4}$/.test(card.cvc)) return setError("CVC 格式不对（3–4 位）。");
+      if (!/^\d{1,2}$/.test(card.exp_month)) return setError("到期月份填 MM。");
+      if (!/^\d{2}$|^\d{4}$/.test(card.exp_year)) return setError("到期年份填 YY 或 YYYY。");
+
+      setBusy(true);
+      try {
+        const out = await payProtocol(orderId, {
+          card: { number, cvc: card.cvc, exp_month: card.exp_month, exp_year: card.exp_year },
+          billing: payloadBilling,
+          proxy: proxy.trim() || undefined,
+        });
+        setResult(out);
+        onDone?.(out);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "协议支付失败");
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
+    // 分支二：浏览器 Stripe 输入框产 pm_，其余仍走协议
+    if (!stripeCard) {
+      return setError("Stripe 输入框还没准备好，请等几秒或刷新金额再试。");
+    }
     setBusy(true);
     try {
+      // 卡数据只进入 Stripe iframe，本站服务端拿不到
+      const pmId = await stripeCard.tokenize({
+        name: payloadBilling.name,
+        email: payloadBilling.email || undefined,
+        line1: payloadBilling.line1,
+        city: payloadBilling.city,
+        state: payloadBilling.state,
+        postal_code: payloadBilling.postal_code,
+        country: payloadBilling.country,
+      });
       const out = await payProtocol(orderId, {
-        card: { number, cvc: card.cvc, exp_month: card.exp_month, exp_year: card.exp_year },
-        billing: { ...billing, country: (billing.country || "US").toUpperCase() },
+        payment_method_id: pmId,
+        billing: payloadBilling,
         proxy: proxy.trim() || undefined,
       });
       setResult(out);
       onDone?.(out);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "协议支付失败");
+      setError(err instanceof Error ? err.message : "Stripe 输入框支付失败");
     } finally {
       setBusy(false);
     }
@@ -211,17 +256,58 @@ export function ProtocolPayPanel({
 
       <Paper withBorder p="md" radius="md">
         <Stack gap="sm">
-          <Text fw={600}>卡片</Text>
-          <TextInput label="卡号" value={card.number} onChange={changeCard("number")}
-            inputMode="numeric" autoComplete="off" disabled={busy} placeholder="4242424242424242" />
-          <SimpleGrid cols={{ base: 1, xs: 3 }}>
-            <TextInput label="到期月份" placeholder="MM" value={card.exp_month}
-              onChange={changeCard("exp_month")} inputMode="numeric" maxLength={2} disabled={busy} />
-            <TextInput label="到期年份" placeholder="YYYY" value={card.exp_year}
-              onChange={changeCard("exp_year")} inputMode="numeric" maxLength={4} disabled={busy} />
-            <PasswordInput label="CVC" value={card.cvc} onChange={changeCard("cvc")}
-              inputMode="numeric" maxLength={4} disabled={busy} />
-          </SimpleGrid>
+          <Text fw={600}>取 payment_method 的方式</Text>
+          <SegmentedControl
+            fullWidth
+            value={pmMode}
+            onChange={(value) => setPmMode(value as "server" | "stripe")}
+            disabled={busy}
+            data={[
+              { value: "server", label: "服务端提交卡号" },
+              { value: "stripe", label: "Stripe 输入框（更接近真人）" },
+            ]}
+          />
+
+          {pmMode === "server" ? (
+            <>
+              <Text size="xs" c="dimmed">
+                卡号直接发给本服务，由服务端调用 Stripe 换 pm_。最快，但缺 Stripe.js 侧的环境信号。
+              </Text>
+              <TextInput label="卡号" value={card.number} onChange={changeCard("number")}
+                inputMode="numeric" autoComplete="off" disabled={busy} placeholder="4242424242424242" />
+              <SimpleGrid cols={{ base: 1, xs: 3 }}>
+                <TextInput label="到期月份" placeholder="MM" value={card.exp_month}
+                  onChange={changeCard("exp_month")} inputMode="numeric" maxLength={2} disabled={busy} />
+                <TextInput label="到期年份" placeholder="YYYY" value={card.exp_year}
+                  onChange={changeCard("exp_year")} inputMode="numeric" maxLength={4} disabled={busy} />
+                <PasswordInput label="CVC" value={card.cvc} onChange={changeCard("cvc")}
+                  inputMode="numeric" maxLength={4} disabled={busy} />
+              </SimpleGrid>
+            </>
+          ) : (
+            <>
+              <Text size="xs" c="dimmed">
+                卡号在 Stripe 自己的 iframe 里输入并换 pm_，本站服务端拿不到卡号。
+                浏览器指纹、Radar 信号与真实用户一致，hCaptcha 更容易放过。
+              </Text>
+              {publishableKey ? (
+                <StripeCardFields
+                  publishableKey={publishableKey}
+                  amount={amount}
+                  currency={currency}
+                  checkoutUrl={checkoutUrl}
+                  requirePaymentMethod
+                  disabled={busy}
+                  onReady={setStripeCard}
+                />
+              ) : (
+                <Alert color="orange" variant="light" icon={<IconAlertCircle size={16} />}>
+                  这个订单没有 publishable_key，无法挂载 Stripe 输入框。
+                  请回到第 1 步重新创建结账，或改用「服务端提交卡号」。
+                </Alert>
+              )}
+            </>
+          )}
         </Stack>
       </Paper>
 
@@ -265,8 +351,19 @@ export function ProtocolPayPanel({
             ? `确认支付 ${price}；币种与税额以 Stripe 计算为准。`
             : "金额尚未读到，按钮暂不可用。"}
         </Text>
-        <Button size="md" loading={busy} disabled={disabled || busy || !price} onClick={() => void run()}>
-          {busy ? "协议支付中…" : price ? `确认支付 ${price}` : "等待报价"}
+        <Button
+          size="md"
+          loading={busy}
+          disabled={disabled || busy || !price || (pmMode === "stripe" && !stripeCard)}
+          onClick={() => void run()}
+        >
+          {busy
+            ? (pmMode === "stripe" ? "提交中…" : "协议支付中…")
+            : !price
+              ? "等待报价"
+              : pmMode === "stripe" && !stripeCard
+                ? "Stripe 输入框加载中…"
+                : `确认支付 ${price}`}
         </Button>
       </Group>
 

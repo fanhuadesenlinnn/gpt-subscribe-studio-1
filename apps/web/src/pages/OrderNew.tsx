@@ -516,6 +516,8 @@ export function OrderNew({ onRecord }: Props) {
               currency={order.currency}
               quotationError={order.quote_error}
               exitLabel={protocolExit}
+              publishableKey={order.publishable_key}
+              checkoutUrl={order.checkout_url}
               disabled={busy}
               onRefreshQuote={async () => {
                 if (!order) return;

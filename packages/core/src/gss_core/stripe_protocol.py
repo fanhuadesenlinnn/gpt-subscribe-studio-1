@@ -159,6 +159,9 @@ class StripeProtocol:
         self._solver_session = ""
         self._solver_ua = ""
         self._email_cache = ""
+        # 由浏览器 Stripe 输入框产出的 pm_：给定时跳过服务端 tokenize。
+        # 卡数据经过 Stripe iframe（真实用户路径），hCaptcha/Radar 判定更宽松。
+        self.external_pm = ""
         self._solver_url = os.environ.get("HCAPTCHA_SOLVER_URL", "").rstrip("/")
 
     def rotate_proxy_sid(self) -> str:
@@ -1065,7 +1068,12 @@ class StripeProtocol:
         else:
             log("   passive 未解出，继续")
 
-        pm_id = self.create_payment_method(cs_id, fp, ctx)
+        if self.external_pm:
+            # 浏览器已用 Stripe 输入框换好 pm_，服务端不再提交卡号
+            pm_id = self.external_pm
+            log(f"⑥ 复用浏览器产出的 {pm_id}")
+        else:
+            pm_id = self.create_payment_method(cs_id, fp, ctx)
         self._sleep(random.uniform(0.5, 1.0))
         confirm_res = self.confirm(cs_id, pm_id, fp, ctx, passive)
 

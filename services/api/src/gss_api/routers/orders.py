@@ -758,10 +758,32 @@ async def get_order(order_id: str) -> OrderOut:
 
 # ── 纯协议支付（不依赖浏览器） ────────────────────────────────
 class ProtocolPayRequest(BaseModel):
-    """纯协议支付的入参。"""
-    card: CardIn
+    """协议支付的入参。
+
+    两种取 pm_ 的方式，二选一：
+      · card              服务端直接向 Stripe 提交卡号（全协议）
+      · payment_method_id 浏览器 Stripe 输入框已换好的 pm_（混合模式）
+        卡数据走 Stripe iframe，与真实用户一致，hCaptcha/Radar 判定更宽松。
+    """
+    card: Optional[CardIn] = None
+    payment_method_id: Optional[str] = Field(default=None, max_length=80)
     billing: BillingIn
     proxy: Optional[str] = Field(default=None, max_length=300)
+
+
+def resolve_protocol_payment_method(payload: "ProtocolPayRequest") -> str:
+    """校验 card / payment_method_id 只给一个，返回浏览器给的 pm_（没有就空串）。
+
+    单独抽出来是为了能离线测：pay-protocol 本身会真的打 Stripe，集成测试不该碰。
+    """
+    pm_id = (payload.payment_method_id or "").strip()
+    if not payload.card and not pm_id:
+        raise HTTPException(400, "需要 card 或 payment_method_id 其一")
+    if payload.card and pm_id:
+        raise HTTPException(400, "card 与 payment_method_id 只能二选一")
+    if pm_id and not pm_id.startswith("pm_"):
+        raise HTTPException(400, "payment_method_id 格式不对（应以 pm_ 开头）")
+    return pm_id
 
 
 class ProtocolPayOut(BaseModel):
@@ -805,7 +827,8 @@ async def pay_order_protocol(order_id: str, payload: ProtocolPayRequest) -> Prot
         configured_proxy("checkout"), payload.billing.country
     )
 
-    card = payload.card.model_dump()
+    pm_id = resolve_protocol_payment_method(payload)
+    card = payload.card.model_dump() if payload.card else {}
     billing = {k: (v or "").strip() for k, v in payload.billing.model_dump().items()}
     billing["country"] = (billing.get("country") or "US").upper()
 
@@ -814,6 +837,8 @@ async def pay_order_protocol(order_id: str, payload: ProtocolPayRequest) -> Prot
             proxy=proxy, captcha_key=captcha_key, captcha_url=captcha_url,
             card=card, billing=billing,
         )
+        # 浏览器已经换好 pm_ 时复用它，服务端不再提交卡号
+        sp.external_pm = pm_id
         try:
             return sp.pay_from_url(checkout_url)
         finally:
