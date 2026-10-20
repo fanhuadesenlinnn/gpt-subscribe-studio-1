@@ -361,3 +361,119 @@ imgs: [], canvases: 0, prompt: ""
 
 **D. 换真实浏览器环境**：服务器装 xvfb + Mesa 已是现状；若 A/B/C 都无效，
 考虑用真实 GPU 的机器（或 macOS runner）跑 solver。
+
+---
+
+## 十、第五轮：七个假设全部排除
+
+| # | 假设 | 验证方式 | 结果 |
+|---|---|---|---|
+| A | 渲染后端 swiftshader 是特征 | 改 `--use-angle=gl` 走 Mesa llvmpipe | ❌ 仍 187s |
+| B | DOM 富度不足 | 实测本机 4444B / 8 div / 0 input 也能成功 | ❌ 不是关键 |
+| C | 缺鼠标事件模拟 | 本机 AB 页完全不模拟鼠标，直接 `__solve` 即成功 | ❌ 不是关键 |
+| D | 出口 IP 被标记 | 服务器试 Psychz / North Central / TE Data / Sony / KDDI / IIJ | ❌ 全失败；本机腾讯云反而成功 |
+| E | render 缺 `host` 参数 | 补 `host: 'b.stripecdn.com'` | ❌ 仍失败 |
+| F | `checksiteconfig` 的 pass | 两边响应逐字段对比 | ❌ 完全相同（pass:true） |
+| G | Chrome 版本差异 | 155.0.8059.85 vs .84 | ❌ 仅末位差 1 |
+
+### 10.1 重要的认知修正：`Please try again` 不是失败标志
+
+本机**成功的那些运行**，challenge iframe 里同样显示：
+
+```
+text: "Please try again. ⚠️ Verify EN"
+```
+
+也就是说这是 hCaptcha 的**中间状态**（内部重试提示），不是终态。
+之前几轮把它当作「已判可疑」是误读。
+
+真正的终态判据只有一个：`hcaptcha.execute()` 的 promise 是否 resolve 出 `response`。
+
+### 10.2 wasm 能力探测：服务器无缺陷
+
+```json
+{"hasWasm":"object","wasmRun":42,"evalOK":true,"newFnOK":true,
+ "timerOK":"scheduled","gpu":"ANGLE (NVIDIA, RTX 3060, D3D11)"}
+```
+
+wasm 实例化、eval、Function 构造、定时器、WebGL 上下文全部正常。
+
+### 10.3 页面对比：结构完全一致
+
+本机成功页 dump（7,534 字节）与服务器页面：
+
+| 项 | 本机 | 服务器 |
+|---|---|---|
+| `api.js` src | `hcaptcha.com/1/api.js?onload=captchaLoad&render=explicit` | 同 |
+| `__solve` | ✓ | ✓ |
+| `__lib` | ✓ | ✓ |
+| `captchaLoad` | ✓ | ✓ |
+| iframe 数（求解后） | 8（4 checkbox + 4 challenge） | 4（2 + 2） |
+
+唯一残留差异：**服务端 iframe 数少一半**。这不排除是「重试次数少」的结果而非原因。
+
+### 10.4 剩余唯一可疑点
+
+本机 8 个 iframe / 服务器 4 个 —— 说明 hCaptcha 在本机会**多跑一轮内部重试**后成功，
+在服务器只跑一轮就放弃。触发重试的条件尚不明确。
+
+### 10.5 结论
+
+代码侧已无已知缺陷。七个假设排除后，剩下的差异无法从「页面结构 / 环境指纹 /
+wasm 能力 / IP / 代理」任一层解释。要么是某个未观测到的信号，
+要么是 hCaptcha 对「首次执行到成功」的时间窗口有隐式要求。
+
+**下一步建议**：
+1. 给服务器页面加 `--disable-blink-features=AutomationControlled` 之外的
+   更多 CDP 规避（如 `Page.setBypassCSP`、`Emulation.setUserAgentOverride` 带 uaMetadata）
+2. 用 `Emulation.setUserAgentOverride` 同时设置 `userAgentMetadata`，
+   让 `navigator.userAgentData` 来自 Chrome 引擎而非 JS 覆盖（当前是 JS 伪造，可能被识破）
+
+### 10.6 第八个假设：JS 伪造 userAgentData 被识破
+
+**假设**：`navigator.userAgentData` 之前是 JS 层覆盖的对象，缺 `getHighEntropyValues`
+的真实实现，Chrome 原生实现才带完整 `fullVersionList` / `architecture` / `bitness`。
+
+**改动**：改用 CDP `Emulation.setUserAgentOverride` 带 `userAgentMetadata`：
+
+```js
+const cdp = await this.page.createCDPSession();
+await cdp.send('Emulation.setUserAgentOverride', {
+  userAgent: ua, acceptLanguage: 'en-US,en', platform: 'Win32',
+  userAgentMetadata: {
+    brands: [...], fullVersionList: [...], fullVersion: '155.0.8059.84',
+    platform: 'Windows', platformVersion: '10.0.0',
+    architecture: 'x86', bitness: '64', mobile: false, wow64: false,
+  },
+});
+```
+
+同时删掉 JS 层对 `userAgentData` 的伪造，避免两者冲突。
+
+**验证生效**：
+
+```json
+{"platform":"Win32",
+ "brands":[{"brand":"Google Chrome","version":"155"}, ...],
+ "platformData":"Windows"}
+{"hasHEV":true,
+ "hev":{"architecture":"x86","bitness":"64","platform":"Windows","platformVersion":"10.0.0"}}
+```
+
+**结果**：❌ `challenge` 仍 187.4s 失败。passive 5.0s 正常。
+
+### 10.7 八个假设的完整清单
+
+| # | 假设 | 结果 |
+|---|---|---|
+| A | swiftshader 渲染特征是主因 | ❌ |
+| B | DOM 富度不足 | ❌ |
+| C | 缺鼠标事件模拟 | ❌ |
+| D | 出口 IP 被标记 | ❌ |
+| E | render 缺 host 参数 | ❌ |
+| F | checksiteconfig 的 pass 不同 | ❌ |
+| G | Chrome 版本差异 | ❌ |
+| H | JS 伪造 userAgentData 被识破 | ❌ |
+
+**八轮排除后，服务器侧的所有可观测差异都已对齐到与本机一致，
+但 `c7faac4c` 仍然 187s 超时。本机同一页面、同一 sitekey、同一 IP 段，369ms 成功。**

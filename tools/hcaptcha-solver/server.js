@@ -61,6 +61,7 @@ const buildPageHtml = () => `<!doctype html><html><head><meta charset="utf-8">
 //   1) 用 window.captchaLoad 等 api.js 就绪
 //   2) render 必须带 error-callback
 //   3) execute 前把 stripe_* 行为信号注入 window（hCaptcha 的 identity 校验读这个）
+var HOST_FOR_RENDER = '__MERCHANT_HOST__';
 window.__reaReady = false;
 window.__reaLib = new Promise(function (resolve) {
   if (window.hcaptcha) { window.__reaReady = true; return resolve(window.hcaptcha); }
@@ -107,6 +108,7 @@ window.__reaSolve = function (sitekey, rqdata, timeoutMs, fraudData) {
       rid = hc.render(div, {
         sitekey: sitekey,
         size: 'invisible',
+        host: HOST_FOR_RENDER,      // 与真实 Stripe 页一致；缺失会让 sitekey 域名校验不匹配
         'error-callback': function (e) { window.__reaRenderError = String(e).slice(0, 200); },
       });
     } catch (e) {
@@ -141,7 +143,7 @@ window.__reaSolve = function (sitekey, rqdata, timeoutMs, fraudData) {
 };
 </script></body></html>`;
 // 延迟求值：PAGE_HTML 依赖 MERCHANT_HOST，而后者在下方才定义
-const PAGE_HTML_GET = () => buildPageHtml();
+const PAGE_HTML_GET = () => buildPageHtml().replace('__MERCHANT_HOST__', MERCHANT_HOST);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const now = () => Date.now();
@@ -256,9 +258,15 @@ async function launchBrowser(proxy) {
     args: [
       '--no-sandbox',
       '--disable-dev-shm-usage',
-      '--use-gl=angle',
-      '--use-angle=swiftshader',
-      '--enable-unsafe-swiftshader',
+      // 渲染后端：默认走 Mesa llvmpipe（--use-angle=gl），而不是 SwiftShader。
+      // 原因：SwiftShader 是纯软渲染，除了 GL 字符串能被 JS 伪装，
+      // readPixels 耗时、帧率、合成延迟这些旁路信号仍是软渲染特征。
+      // llvmpipe 也是 CPU 渲染，但走 Mesa 的 GL 栈，时序分布更接近真机。
+      // 可用 GPU_BACKEND=swiftshader 回退。
+      ...(process.env.GPU_BACKEND === 'swiftshader'
+        ? ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader']
+        : ['--use-gl=angle', '--use-angle=gl', '--enable-unsafe-swiftshader',
+           '--enable-features=Vulkan', '--disable-gpu-sandbox']),
       '--ignore-gpu-blocklist',
       '--disable-blink-features=AutomationControlled',
       '--disable-features=IsolateOrigins,site-per-process',
@@ -306,7 +314,43 @@ class Session {
       });
     }
 
-    await this.page.setUserAgent(this.ua);
+    // 关键：用 CDP 的 Emulation.setUserAgentOverride 带 userAgentMetadata，
+    // 让 navigator.userAgentData 由 Chrome 引擎自己生成（含 brand/版本/平台/架构全套），
+    // 而不是靠 JS 覆盖。JS 覆盖的 userAgentData 缺少 fullVersionList、
+    // getHighEntropyValues 的真实实现，是能被识别的伪造。
+    try {
+      const cdp = await this.page.createCDPSession();
+      await cdp.send('Emulation.setUserAgentOverride', {
+        userAgent: this.ua,
+        acceptLanguage: 'en-US,en',
+        platform: 'Win32',
+        userAgentMetadata: {
+          brands: [
+            { brand: 'Google Chrome', version: '155' },
+            { brand: 'Chromium', version: '155' },
+            { brand: 'Not=A?Brand', version: '24' },
+          ],
+          fullVersionList: [
+            { brand: 'Google Chrome', version: '155.0.8059.84' },
+            { brand: 'Chromium', version: '155.0.8059.84' },
+            { brand: 'Not=A?Brand', version: '24.0.0.0' },
+          ],
+          fullVersion: '155.0.8059.84',
+          platform: 'Windows',
+          platformVersion: '10.0.0',
+          architecture: 'x86',
+          model: '',
+          mobile: false,
+          bitness: '64',
+          wow64: false,
+        },
+      });
+      this._cdp = cdp;
+      console.log('   CDP UA override（含 userAgentMetadata）已应用');
+    } catch (e) {
+      console.log('   CDP UA override 失败，回退 setUserAgent: ' + String(e).slice(0, 80));
+      await this.page.setUserAgent(this.ua);
+    }
     await this.page.setExtraHTTPHeaders({
       'Accept-Language': 'en-US,en;q=0.9',
     });
@@ -329,28 +373,8 @@ class Session {
       Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.', configurable: true });
       Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'], configurable: true });
 
-      // 3) userAgentData 必须与 UA 一致（真实 Chrome 一定有值）
-      if (navigator.userAgentData) {
-        const brands = [
-          { brand: 'Google Chrome', version: '155' },
-          { brand: 'Chromium', version: '155' },
-          { brand: 'Not=A?Brand', version: '24' },
-        ];
-        Object.defineProperty(navigator, 'userAgentData', {
-          get: () => ({
-            brands,
-            mobile: false,
-            platform: 'Windows',
-            getHighEntropyValues: () => Promise.resolve({
-              architecture: 'x86', bitness: '64', brands, mobile: false,
-              model: '', platform: 'Windows', platformVersion: '10.0.0',
-              uaFullVersion: '155.0.8059.84', fullVersionList: brands, wow64: false,
-            }),
-            toJSON: () => ({ brands, mobile: false, platform: 'Windows' }),
-          }),
-          configurable: true,
-        });
-      }
+      // 3) userAgentData 交给 CDP 的 Emulation.setUserAgentOverride 生成（原生值），
+      //    JS 层不再伪造，避免与原生实现冲突导致特征不一致。
 
       // 4) 真实性旁证：plugins / mimeTypes 有非空项
       const fakePlugins = [
