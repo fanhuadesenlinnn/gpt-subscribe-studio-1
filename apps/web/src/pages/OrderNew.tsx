@@ -244,9 +244,10 @@ export function OrderNew({ onRecord }: Props) {
           });
         }
         setSession("");
-        if (plan === "team" && created.publishable_key) {
+        if (plan === "team") {
           try {
-            // Initial price needs only init, not card data, tax updates, SDK or captcha.
+            // 只要拿到 cs_ 就能 init 报价，与有没有 publishable_key 无关。
+            // 全协议模式不需要 pk，所以这里不能拿 pk 当条件。
             setOrder(await quoteTeam(created.id));
           } catch (err) {
             setOrder({ ...created, quote_error: err instanceof Error ? err.message : "报价读取失败，本步骤未提交付款" });
@@ -332,6 +333,8 @@ export function OrderNew({ onRecord }: Props) {
       {error}
     </Alert>
   ) : null;
+  // 全协议模式的出口：账单国决定，后端会自动把网关地区换成该国家
+  const protocolExit = (order?.billing?.country || order?.billing_country || country || "").toUpperCase() || undefined;
   // 全协议模式在 step 1 由 ProtocolPayPanel 自带按钮，底部不再重复一个「确认支付」
   const protocolStep = payMode === "protocol" && step === 1;
   const primaryAction = step < 2 && !protocolStep ? (
@@ -453,10 +456,10 @@ export function OrderNew({ onRecord }: Props) {
             </Stack>
           )}
 
-          {step === 1 && order && hosted && (
+          {step === 1 && order && linkOnly && (
             <Stack gap="md">
               <Alert color="green" variant="light" icon={<IconCheck size={18} />} title="结账已创建">
-                Team 官方付款链接已生成，可打开页面完成付款。金额、折扣和税费以官方结账页为准，付款后回到本页查询订阅。
+                官方付款链接已生成，可打开页面完成付款。金额、折扣和税费以官方结账页为准，付款后回到本页查询订阅。
               </Alert>
               <Code block style={{ wordBreak: "break-all", whiteSpace: "pre-wrap" }}>
                 {order.checkout_url}
@@ -509,7 +512,28 @@ export function OrderNew({ onRecord }: Props) {
             <ProtocolPayPanel
               orderId={order.id}
               country={order.billing_country || country}
+              amount={order.amount}
+              currency={order.currency}
+              quotationError={order.quote_error}
+              exitLabel={protocolExit}
               disabled={busy}
+              onRefreshQuote={async () => {
+                if (!order) return;
+                setBusy(true);
+                setError(null);
+                try {
+                  // 报价带账单地址才能算准税额；订单上已有就用它
+                  const known = order.billing;
+                  const complete = Boolean(
+                    known?.name && known?.line1 && known?.city && known?.postal_code && known?.country,
+                  );
+                  setOrder(await quoteTeam(order.id, complete ? (known as BillingInput) : undefined));
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : "报价读取失败");
+                } finally {
+                  setBusy(false);
+                }
+              }}
               onDone={(out) => {
                 // 协议层结果不是订单状态，拉一次订单让页面走到结果页/继续
                 void (async () => {

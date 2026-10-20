@@ -16,15 +16,23 @@ import {
 import { IconAlertCircle, IconCheck, IconClock, IconX } from "@tabler/icons-react";
 import { useState } from "react";
 
-import { payProtocol, type BillingInput, type ProtocolPayResult } from "../api/client";
+import { formatAmount, payProtocol, type BillingInput, type ProtocolPayResult } from "../api/client";
 import { randomBillingExample } from "../card-payment/billingExamples";
 
 interface Props {
   orderId: string;
   /** 订单创建时选的地区，用于预填账单国家 */
   country: string;
+  /** 应付金额（最小货币单位）与币种，来自 /team/quote */
+  amount?: string | null;
+  currency?: string | null;
+  quotationError?: string | null;
+  /** 本轮实际使用的出口（只显示国家与 ISP，不显示账号密码） */
+  exitLabel?: string;
   disabled?: boolean;
   onDone?: (result: ProtocolPayResult) => void;
+  /** 重新向 Stripe 读一次金额（报价超时会用） */
+  onRefreshQuote?: () => Promise<void> | void;
 }
 
 interface CardDraft {
@@ -96,7 +104,10 @@ const STEPS = [
   { title: "poll", description: "轮询终态" },
 ];
 
-export function ProtocolPayPanel({ orderId, country, disabled, onDone }: Props) {
+export function ProtocolPayPanel({
+  orderId, country, amount, currency, quotationError, exitLabel, disabled, onDone,
+  onRefreshQuote,
+}: Props) {
   const [card, setCard] = useState<CardDraft>(EMPTY_CARD);
   const [billing, setBilling] = useState<BillingInput>(() => {
     const base: BillingInput = {
@@ -146,8 +157,52 @@ export function ProtocolPayPanel({ orderId, country, disabled, onDone }: Props) 
 
   const view = result ? describe(result) : null;
 
+  const price = formatAmount(amount, currency);
+
   return (
     <Stack gap="md">
+      {/* 金额放最上面：确认支付之前先让人看清要付多少 */}
+      <Paper withBorder p="lg" radius="md" className="protocol-amount">
+        <Group justify="space-between" align="flex-end" wrap="nowrap">
+          <div>
+            <Text size="xs" c="dimmed" tt="uppercase" fw={600}>应付金额</Text>
+            <Text fz={32} fw={700} lh={1.1} mt={4}>
+              {price ?? (quotationError ? "读取失败" : "读取中…")}
+            </Text>
+            <Text size="xs" c="dimmed" mt={4}>
+              {country}
+              {currency ? ` · ${currency.toUpperCase()}` : ""}
+              {exitLabel ? ` · 出口 ${exitLabel}` : ""}
+            </Text>
+          </div>
+          <Badge size="lg" variant="light" color={price ? "green" : "gray"}>
+            {price ? "待支付" : "待报价"}
+          </Badge>
+        </Group>
+        {quotationError && (
+          <Alert color="red" variant="light" mt="sm" icon={<IconAlertCircle size={16} />}>
+            金额读取失败：{quotationError}
+          </Alert>
+        )}
+        {!price && !quotationError && (
+          <Group justify="space-between" align="center" mt="sm" wrap="nowrap">
+            <Text size="xs" c="dimmed">
+              正在向 Stripe 读取应付金额（init + tax_region），读到后按钮才可用。若一直不动，点右侧刷新。
+            </Text>
+            {onRefreshQuote && (
+              <Button size="xs" variant="light" disabled={busy} onClick={() => void onRefreshQuote()}>
+                刷新金额
+              </Button>
+            )}
+          </Group>
+        )}
+        {quotationError && onRefreshQuote && (
+          <Button size="xs" variant="light" mt="xs" disabled={busy} onClick={() => void onRefreshQuote()}>
+            重新读取金额
+          </Button>
+        )}
+      </Paper>
+
       <Alert color="blue" variant="light" icon={<IconAlertCircle size={18} />} title="全协议模式（无浏览器）">
         服务端直接用 HTTP 和 Stripe 对话：不加载 Stripe.js、不弹 iframe、不需要你点验证框。
         卡号只在这一次请求里使用，服务端不写库、不打日志。
@@ -204,9 +259,14 @@ export function ProtocolPayPanel({ orderId, country, disabled, onDone }: Props) 
         disabled={busy}
       />
 
-      <Group justify="flex-end">
-        <Button size="md" loading={busy} disabled={disabled || busy} onClick={() => void run()}>
-          {busy ? "协议支付中…" : "开始协议支付"}
+      <Group justify="space-between" align="center">
+        <Text size="xs" c="dimmed">
+          {price
+            ? `确认支付 ${price}；币种与税额以 Stripe 计算为准。`
+            : "金额尚未读到，按钮暂不可用。"}
+        </Text>
+        <Button size="md" loading={busy} disabled={disabled || busy || !price} onClick={() => void run()}>
+          {busy ? "协议支付中…" : price ? `确认支付 ${price}` : "等待报价"}
         </Button>
       </Group>
 
