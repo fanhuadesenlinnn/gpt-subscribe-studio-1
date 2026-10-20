@@ -38,7 +38,19 @@ const puppeteer = require(process.env.PUPPETEER_PATH || 'puppeteer-core');
 
 const PORT = Number(process.env.PORT || 8199);
 const HOST = process.env.HOST || '127.0.0.1';
-const CHROME = process.env.CHROME_PATH || '/usr/bin/google-chrome';
+// Chrome 路径：优先环境变量，其次按平台推断
+const CHROME = process.env.CHROME_PATH || (() => {
+  const cands = [
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium',
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+  ];
+  for (const c of cands) {
+    try { if (require('node:fs').existsSync(c)) return c; } catch (_) {}
+  }
+  return '/usr/bin/google-chrome';
+})();
 const DEFAULT_SITEKEY = process.env.HCAPTCHA_SITEKEY || '24ed0064-62cf-4d42-9960-5dd1a41d4e29';
 const DEFAULT_HOST = process.env.HCAPTCHA_HOST || 'b.stripecdn.com';
 const TOKEN_TIMEOUT_MS = Number(process.env.TOKEN_TIMEOUT_MS || 90000);
@@ -493,7 +505,7 @@ async function launchBrowser(proxy) {
     : ['--ignore-certificate-errors', '--allow-insecure-localhost'];
   return puppeteer.launch({
     executablePath: CHROME,
-    headless: false,
+    headless: process.env.HEADLESS === 'true' ? 'shell' : false,
     args: [
       '--no-sandbox',
       '--disable-dev-shm-usage',
