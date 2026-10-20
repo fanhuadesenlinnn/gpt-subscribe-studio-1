@@ -93,6 +93,194 @@ window.addEventListener('message', function (ev) {
   }
 });
 
+// ── 页面内自动答题器 ────────────────────────────────────────
+// 必须在 execute 的生命周期内运行：hCaptcha 一旦被我们的超时切断，
+// challenge 页面立即销毁，之后任何点击都无效。
+// 这里用定时器盯着 challenge iframe，题目一出现就地分析并点击。
+window.__reaAuto = {
+  active: false,
+  attempts: 0,
+  log: [],
+  timer: null,
+  lastSig: '',
+
+  start: function (opts) {
+    if (this.active) return;
+    this.active = true;
+    this.attempts = 0;
+    this.log = [];
+    var self = this;
+    var cfg = opts || {};
+    this.timer = setInterval(function () { self.tick(cfg); }, Number(cfg.intervalMs || 400));
+  },
+
+  stop: function () {
+    this.active = false;
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+  },
+
+  note: function (msg) {
+    this.log.push(Date.now() + ' ' + msg);
+    if (this.log.length > 60) this.log.shift();
+  },
+
+  // 找到 challenge iframe 的 document（同源才能读；跨域拿不到）
+  challengeDoc: function () {
+    var fs = document.querySelectorAll('iframe');
+    for (var i = 0; i < fs.length; i++) {
+      var src = fs[i].src || '';
+      if (src.indexOf('frame=challenge') === -1) continue;
+      try {
+        var d = fs[i].contentDocument;
+        if (d) return { doc: d, el: fs[i] };
+      } catch (e) {}
+    }
+    return null;
+  },
+
+  tick: function (cfg) {
+    if (!this.active || this.attempts >= (cfg.maxAttempts || 3)) return;
+    var got = this.challengeDoc();
+    if (!got) return;
+    var doc = got.doc;
+
+    // 题干文字
+    var text = (doc.body && doc.body.innerText || '').replace(/\s+/g, ' ').slice(0, 200);
+    if (!text) return;
+    var sig = text.slice(0, 60) + '|' + doc.querySelectorAll('canvas').length;
+    if (sig === this.lastSig) return;   // 同一道题不重复处理
+    this.lastSig = sig;
+
+    // 9 宫格题：能直接按格子点击（判据是物体类别，需要外部知识，这里先跳过）
+    var cells = doc.querySelectorAll('[aria-label^="Challenge Image"]');
+    if (cells.length >= 4) {
+      this.note('9grid:' + cells.length + ' -> skip');
+      var skip = doc.querySelector('[aria-label^="Skip Challenge"]');
+      if (skip) { try { skip.click(); } catch (e) {} }
+      return;
+    }
+
+    // 线条题：canvas 像素分析
+    var cv = doc.querySelector('canvas');
+    if (cv) {
+      this.attempts += 1;
+      var res = this.solveLines(cv, doc);
+      this.note('lines:' + JSON.stringify(res && res.picked ? res.picked.length : 0));
+      if (res && res.picked && res.picked.length >= 2) {
+        this.clickAt(doc, res.picked);
+      }
+    }
+  },
+
+  // 线条题：高亮低饱和像素 -> 连通域 -> PCA 主轴长度 -> 最短两条
+  solveLines: function (cv, doc) {
+    try {
+      var W = cv.width, H = cv.height;
+      var ctx = cv.getContext('2d');
+      var img = ctx.getImageData(0, 0, W, H).data;
+
+      // 1) 生成掩码
+      var mask = new Uint8Array(W * H);
+      var cnt = 0;
+      for (var y = 0; y < H; y++) {
+        for (var x = 0; x < W; x++) {
+          var i = (y * W + x) * 4;
+          var r = img[i], g = img[i + 1], b = img[i + 2];
+          var mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+          var v = mx, s = mx === 0 ? 0 : Math.round((mx - mn) * 255 / mx);
+          // 线条：亮（v>150）且低饱和（s<110）
+          if (v > 150 && s < 110) { mask[y * W + x] = 1; cnt++; }
+        }
+      }
+      if (cnt < 500) return { err: 'few_pixels', cnt: cnt };
+
+      // 2) 连通域（4 邻域，迭代栈）
+      var lab = new Int32Array(W * H);
+      var comps = [];
+      var cur = 0;
+      var stack = new Int32Array(W * H);
+      for (var p0 = 0; p0 < W * H; p0++) {
+        if (!mask[p0] || lab[p0]) continue;
+        cur++;
+        var sp = 0; stack[sp++] = p0; lab[p0] = cur;
+        var xs = [], ys = [];
+        while (sp > 0) {
+          var q = stack[--sp];
+          var qx = q % W, qy = (q / W) | 0;
+          xs.push(qx); ys.push(qy);
+          var nb = [q - 1, q + 1, q - W, q + W];
+          for (var k = 0; k < 4; k++) {
+            var nq = nb[k];
+            if (nq < 0 || nq >= W * H) continue;
+            if (k < 2 && (Math.abs((nq % W) - qx) !== 1)) continue;
+            if (!mask[nq] || lab[nq]) continue;
+            lab[nq] = cur; stack[sp++] = nq;
+          }
+        }
+        if (xs.length < 300) continue;
+        // PCA
+        var mx2 = 0, my2 = 0;
+        for (var t = 0; t < xs.length; t++) { mx2 += xs[t]; my2 += ys[t]; }
+        mx2 /= xs.length; my2 /= xs.length;
+        var sxx = 0, syy = 0, sxy = 0;
+        for (var t2 = 0; t2 < xs.length; t2++) {
+          var dx = xs[t2] - mx2, dy = ys[t2] - my2;
+          sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+        }
+        sxx /= xs.length; syy /= xs.length; sxy /= xs.length;
+        var tr = sxx + syy, det = sxx * syy - sxy * sxy;
+        var disc = Math.sqrt(Math.max(0, tr * tr / 4 - det));
+        var l1 = tr / 2 + disc;
+        var span = Math.sqrt(Math.max(0, l1)) * 3.46;   // ≈ 6σ
+        comps.push({ n: xs.length, span: span, cx: mx2, cy: my2 });
+      }
+      if (comps.length < 2) return { err: 'few_comps', comps: comps.length };
+      comps.sort(function (a, b) { return a.span - b.span; });
+      // 取最短两条，坐标换算成 canvas 内的点击点
+      var picked = comps.slice(0, 2).map(function (c) {
+        return [c.cx / W, c.cy / H];
+      });
+      return { picked: picked, comps: comps.length,
+               spans: comps.slice(0, 6).map(function (c) { return Math.round(c.span); }) };
+    } catch (e) {
+      return { err: String(e).slice(0, 100) };
+    }
+  },
+
+  // 在 challenge iframe 内按 canvas 归一化坐标派发点击
+  clickAt: function (doc, coords) {
+    var cv = doc.querySelector('canvas');
+    if (!cv) return;
+    var r = cv.getBoundingClientRect();
+    for (var i = 0; i < coords.length; i++) {
+      var cx = r.left + coords[i][0] * r.width;
+      var cy = r.top + coords[i][1] * r.height;
+      var tgt = doc.elementFromPoint(cx, cy) || cv;
+      ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function (type) {
+        var isPointer = type.indexOf('pointer') === 0;
+        var Ev = isPointer ? (window.PointerEvent || MouseEvent) : MouseEvent;
+        tgt.dispatchEvent(new Ev(type, {
+          bubbles: true, cancelable: true, clientX: cx, clientY: cy,
+          view: doc.defaultView, button: 0,
+        }));
+      });
+      this.note('click ' + Math.round(cx) + ',' + Math.round(cy));
+    }
+    // 点击后找提交按钮
+    var self = this;
+    setTimeout(function () {
+      var btns = doc.querySelectorAll('div[role=button],button,div.button');
+      for (var b = 0; b < btns.length; b++) {
+        var tt = (btns[b].innerText || '').trim().toLowerCase();
+        if (/^(verify|submit|next|continue)$/.test(tt)) {
+          try { btns[b].click(); self.note('submit'); } catch (e) {}
+          break;
+        }
+      }
+    }, 700);
+  }
+};
+
 window.__reaSolve = function (sitekey, rqdata, timeoutMs, fraudData) {
   return window.__reaLib.then(function (hc) {
     if (!hc || typeof hc.render !== 'function') {
@@ -142,6 +330,13 @@ window.__reaSolve = function (sitekey, rqdata, timeoutMs, fraudData) {
         if (rqdata) opts.rqdata = rqdata;
         var t0 = Date.now();
         var done = false;
+        // 启动页面内自动答题器：必须与 execute 并行，
+        // 因为 challenge 的存活期绑定在 execute 的 promise 上。
+        try {
+          if (window.__reaAuto && !window.__reaAuto.active) {
+            window.__reaAuto.start({ intervalMs: 350, maxAttempts: 3 });
+          }
+        } catch (e) {}
         // 超时后把 promise 保留在 window 上，供外部答题后再等结果。
         // 直接 resolve 会让 hCaptcha 的 execute 变成孤儿，页面被回收后 canvas 就没了。
         window.__reaPending = { rid: rid, t0: t0, el: null, token: null, error: null };
@@ -165,6 +360,7 @@ window.__reaSolve = function (sitekey, rqdata, timeoutMs, fraudData) {
         hc.execute(rid, opts).then(function (v) {
           var tok = (v && v.response) || v;
           var good = typeof tok === 'string' && tok.length > 100;
+          try { if (window.__reaAuto) window.__reaAuto.stop(); } catch (e) {}
           if (window.__reaPending) {
             window.__reaPending.token = good ? tok : null;
             window.__reaPending.ekey = (v && (v.ekey || v.key)) || '';
@@ -580,9 +776,175 @@ class Session {
     return run;
   }
 
+  /**
+   * 给 challenge frame 预注入自动答题器。
+   * challenge iframe 跨域，主页面读不到 contentDocument，
+   * 只能在 frame 自己的 JS 上下文里跑分析逻辑。
+   */
+  async installFrameSolver() {
+    const script = String.raw`(() => {
+      if (window.__frameAuto) return 'already';
+      window.__frameAuto = { log: [], done: false, timer: null, count: 0, lastBodySig: '', lastSig: '' };
+
+      function note(m) {
+        window.__frameAuto.log.push(Date.now() + ' ' + m);
+        if (window.__frameAuto.log.length > 50) window.__frameAuto.log.shift();
+      }
+
+      function fire(el, type, x, y) {
+        const isPtr = type.indexOf('pointer') === 0;
+        const Ev = isPtr ? (window.PointerEvent || MouseEvent) : MouseEvent;
+        el.dispatchEvent(new Ev(type, {
+          bubbles: true, cancelable: true, clientX: x, clientY: y,
+          view: window, button: 0, buttons: type.indexOf('down') >= 0 ? 1 : 0,
+        }));
+      }
+
+      function clickAt(x, y) {
+        const el = document.elementFromPoint(x, y) || document.body;
+        ['mousedown', 'mouseup', 'click'].forEach((t) => fire(el, t, x, y));
+      }
+
+      function solveLines(cv) {
+        const W = cv.width, H = cv.height;
+        const ctx = cv.getContext('2d');
+        let data;
+        try { data = ctx.getImageData(0, 0, W, H).data; }
+        catch (e) { return { err: 'tainted' }; }
+        const mask = new Uint8Array(W * H);
+        let cnt = 0;
+        for (let y = 0; y < H; y++) {
+          for (let x = 0; x < W; x++) {
+            const i = (y * W + x) * 4;
+            const r = data[i], g = data[i + 1], b = data[i + 2];
+            const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+            const v = mx, s = mx === 0 ? 0 : Math.round((mx - mn) * 255 / mx);
+            if (v > 150 && s < 110) { mask[y * W + x] = 1; cnt++; }
+          }
+        }
+        if (cnt < 500) return { err: 'few_px', cnt };
+        const lab = new Int32Array(W * H);
+        const comps = [];
+        let cur = 0;
+        const st = new Int32Array(W * H);
+        for (let p0 = 0; p0 < W * H; p0++) {
+          if (!mask[p0] || lab[p0]) continue;
+          cur++;
+          let sp = 0; st[sp++] = p0; lab[p0] = cur;
+          const xs = [], ys = [];
+          while (sp > 0) {
+            const q = st[--sp];
+            const qx = q % W, qy = (q / W) | 0;
+            xs.push(qx); ys.push(qy);
+            const nb = [q - 1, q + 1, q - W, q + W];
+            for (let k = 0; k < 4; k++) {
+              const nq = nb[k];
+              if (nq < 0 || nq >= W * H) continue;
+              if (k < 2 && Math.abs((nq % W) - qx) !== 1) continue;
+              if (!mask[nq] || lab[nq]) continue;
+              lab[nq] = cur; st[sp++] = nq;
+            }
+          }
+          // 过滤碎片：线条面积通常 >600，且要有一定跨度
+          if (xs.length < 600) continue;
+          let mxx = 0, myy = 0;
+          for (let t = 0; t < xs.length; t++) { mxx += xs[t]; myy += ys[t]; }
+          mxx /= xs.length; myy /= xs.length;
+          let sxx = 0, syy = 0, sxy = 0;
+          for (let t2 = 0; t2 < xs.length; t2++) {
+            const dx = xs[t2] - mxx, dy = ys[t2] - myy;
+            sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+          }
+          sxx /= xs.length; syy /= xs.length; sxy /= xs.length;
+          const tr = sxx + syy, det = sxx * syy - sxy * sxy;
+          const disc = Math.sqrt(Math.max(0, tr * tr / 4 - det));
+          const l1 = tr / 2 + disc;
+          const span = Math.sqrt(Math.max(0, l1)) * 3.46;
+          // 真线条跨度通常 > 60px（canvas 内部坐标，DPR2 下即 30 CSS px）
+          if (span < 60) continue;
+          // 排除接近方形的大块（背景反光）
+          const fill = xs.length / Math.max(1, (Math.max(...xs) - Math.min(...xs) + 1) *
+                                              (Math.max(...ys) - Math.min(...ys) + 1));
+          if (fill > 0.45) continue;
+          comps.push({ n: xs.length, span, cx: mxx, cy: myy, fill: Math.round(fill * 100) });
+        }
+        if (comps.length < 2) return { err: 'few_comps', n: comps.length };
+        comps.sort((a, b) => a.span - b.span);
+        return { comps: comps.length, spans: comps.slice(0, 6).map((c) => Math.round(c.span)),
+                 picked: comps.slice(0, 2).map((c) => [c.cx, c.cy]) };
+      }
+
+      function tick() {
+        if (window.__frameAuto.done) return;
+        if (window.__frameAuto.count > 12) { window.__frameAuto.done = true; return; }
+        const bodySig = (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 60);
+        if (bodySig && bodySig === window.__frameAuto.lastBodySig) return;
+        const cvs = document.querySelectorAll('canvas');
+        const grids = document.querySelectorAll('[aria-label^="Challenge Image"]');
+        if (grids.length >= 4) {
+          note('grid:' + grids.length);
+          const skip = document.querySelector('[aria-label^="Skip Challenge"]');
+          if (skip) {
+            try { skip.click(); note('skip'); } catch (e) {}
+          }
+          // skip 之后 hCaptcha 会出新题，不能置 done，等下一轮 tick 重新判断
+          window.__frameAuto.lastGridSig = grids.length + ':' + Date.now();
+          return;
+        }
+        if (!cvs.length) return;
+        const cv = cvs[0];
+        window.__frameAuto.count += 1;
+        window.__frameAuto.lastBodySig = bodySig;
+        const res = solveLines(cv);
+        if (res.err) { note('lines:' + res.err); return; }
+        note('spans:' + res.spans.join(','));
+        const r = cv.getBoundingClientRect();
+        res.picked.forEach(([px, py]) => {
+          const x = r.left + (px / cv.width) * r.width;
+          const y = r.top + (py / cv.height) * r.height;
+          clickAt(x, y);
+          note('click:' + Math.round(x) + ',' + Math.round(y));
+        });
+        // 记下本次答题的题面签名，避免对同一道题重复点击
+        window.__frameAuto.lastSig = (document.body.innerText || '').slice(0, 50) + '|' + res.spans.join(',');
+        setTimeout(() => {
+          const btns = document.querySelectorAll('div[role=button],button,div.button');
+          for (const b of btns) {
+            const t = (b.innerText || '').trim().toLowerCase();
+            if (/^(verify|submit|next|continue)$/.test(t)) {
+              try { b.click(); note('submit'); } catch (e) {}
+              break;
+            }
+          }
+        }, 800);
+      }
+
+      window.__frameAuto.timer = setInterval(tick, 400);
+      setTimeout(() => { try { clearInterval(window.__frameAuto.timer); } catch (e) {} }, 45000);
+      return 'installed';
+    })()`;
+    let n = 0;
+    for (const f of this.page.frames()) {
+      if (!/challenge|newassets/.test(f.url())) continue;
+      try { await f.evaluate(script); n += 1; } catch (_) {}
+    }
+    return n;
+  }
+
   async solve({ sitekey, rqdata, host, timeout }) {
     this.usedAt = now();
     this.solves += 1;
+
+    // frame 级答题器必须在最开头启动：challenge iframe 是 __reaSolve
+    // 内部 render 之后才创建的，注入器要一直在跑才能赶上。
+    // 之前放在 direct 分支之后，永远走不到（direct 会 return）。
+    const injector = setInterval(() => {
+      this.installFrameSolver().catch(() => {});
+    }, 600);
+    const stopInjector = () => {
+      try { clearInterval(injector); } catch (_) {}
+    };
+    setTimeout(stopInjector, 120000);
 
     // 首选：页面自己的 __reaSolve（HCaptchaInvisible.html 内，加载了 api.js）。
     // 这条路径实测 300-370ms 出 token，不需要图像题。
@@ -594,16 +956,19 @@ class Session {
         { sitekey: sitekey || DEFAULT_SITEKEY, rqdata: rqdata || '', timeout: timeout || TOKEN_TIMEOUT_MS },
       );
       if (direct && direct.token) {
+        stopInjector();
         return { token: direct.token, ekey: direct.ekey || '' };
       }
       // 有结果但不是 token：记录原因后立刻返回，不再跑兜底。
       // 兜底会让总耗时翻倍（90+90=180s）并掩盖 __reaSolve 的真实失败原因。
       if (direct && direct.error) {
         const ch = await this.captureChallenge().catch(() => null);
+        stopInjector();
         return { error: direct.error, challenge: ch || undefined };
       }
       if (direct && direct.timeout) {
         const ch = await this.captureChallenge().catch(() => null);
+        stopInjector();
         return { error: 'execute_timeout', challenge: ch || undefined };
       }
     } catch (_) {}
@@ -663,6 +1028,7 @@ class Session {
         if (ch) result.challenge = ch;
       } catch (_) {}
     }
+    stopInjector();
     if (result.error) this.failures += 1;
     return result;
   }
@@ -1177,6 +1543,40 @@ const server = http.createServer(async (req, res) => {
       });
       if (!b64) return send(404, { error: 'challenge iframe not found' });
       return send(200, { ok: true, box: b64.box, png: b64.b64 });
+    } catch (e) {
+      return send(500, { error: String(e).slice(0, 300) });
+    } finally {
+      s.busy = false;
+    }
+  }
+
+  // 读取 frame 级自动答题器的日志：{ session_id }
+  if (req.method === 'POST' && url.pathname === '/frame-log') {
+    const body = await readBody(req);
+    const s = sessions.get((body && body.session_id) || '');
+    if (!s) return send(404, { error: 'no_session' });
+    try {
+      s.busy = true;
+      const out = await s.withLock(async () => {
+        const list = [];
+        for (const f of s.page.frames()) {
+          if (!/challenge|newassets/.test(f.url())) continue;
+          let info = null;
+          try {
+            info = await f.evaluate(() => ({
+              installed: !!window.__frameAuto,
+              done: window.__frameAuto ? window.__frameAuto.done : null,
+              log: window.__frameAuto ? window.__frameAuto.log.slice(-15) : null,
+              canvases: document.querySelectorAll('canvas').length,
+              grids: document.querySelectorAll('[aria-label^="Challenge Image"]').length,
+              text: (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 100),
+            }));
+          } catch (e) { info = { err: String(e).slice(0, 100) }; }
+          list.push({ url: f.url().slice(0, 90), info });
+        }
+        return list;
+      });
+      return send(200, { frames: out });
     } catch (e) {
       return send(500, { error: String(e).slice(0, 300) });
     } finally {
