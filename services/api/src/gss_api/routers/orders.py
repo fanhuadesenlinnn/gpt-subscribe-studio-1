@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, status
+from pydantic import BaseModel, Field
 
 from gss_contracts import (
     AccountSource,
@@ -27,6 +28,7 @@ from gss_contracts.errors import DomainError, ErrorCode
 from gss_core.config import load_settings, use_fake_adapters
 from gss_core.countries import is_supported, normalize_country
 from gss_core.hosted import TeamHostedClient
+from gss_core.stripe_protocol import StripeProtocol, PaymentOutcome
 from gss_core.proxies import align_proxy_region, configured_proxy, session_proxy
 from gss_core.redaction import redact_sensitive
 from gss_core.chatgpt import ChatGPTClient, clamp_team_seats
@@ -36,7 +38,18 @@ from gss_orchestrator.pipeline import apply_payment_result, assert_deliverable
 from gss_payment.adapter import hosted_payment_result
 
 from ..runtime import build_pipeline
-from ..schemas import ErrorOut, ModeIn, OrderCreateRequest, OrderOut, OrderPayRequest, SubscriptionOut, TeamPrepareRequest, TeamQuoteRequest
+from ..schemas import (
+    BillingIn,
+    CardIn,
+    ErrorOut,
+    ModeIn,
+    OrderCreateRequest,
+    OrderOut,
+    OrderPayRequest,
+    SubscriptionOut,
+    TeamPrepareRequest,
+    TeamQuoteRequest,
+)
 from ..store import store
 from .events import notify_order_update
 
@@ -304,8 +317,18 @@ async def _mark_delivered(order_id: str) -> None:
     await notify_order_update(order_id, OrderStatus.DELIVERED, {"payment_confirmed": True})
 
 
-def _team_client(secrets: OrderSecrets) -> ChatGPTClient:
-    client = ChatGPTClient.from_raw_session(secrets.session, proxy=secrets.proxy or None)
+def _team_client(secrets: OrderSecrets, country: str = "") -> ChatGPTClient:
+    """Build a client for this order, optionally exiting from the billing country.
+
+    A Team checkout may be created for one region while the card is billed to
+    another; Stripe then expects the payment requests to exit from the billing
+    country, so the exit is realigned for those calls only.
+    """
+    proxy = secrets.proxy or ""
+    want = str(country or "").strip().upper()
+    if proxy and want:
+        proxy = align_proxy_region(proxy, want) or proxy
+    client = ChatGPTClient.from_raw_session(secrets.session, proxy=proxy or None)
     client.timeout = 30.0
     return client
 
@@ -435,7 +458,8 @@ async def _solve_challenge(order_id: str, secrets, view):
     client_secret = str(action.get("client_secret") or "")
     if not intent_id.startswith("pi_") or not client_secret.startswith("pi_"):
         return None
-    client = _team_client(secrets)
+    billing_country = str((getattr(view, "billing", {}) or {}).get("country") or "").upper()
+    client = _team_client(secrets, billing_country)
     started = time.monotonic()
     try:
         agent = ""
@@ -559,7 +583,7 @@ async def _pay_order(order_id: str, payload: OrderPayRequest) -> OrderOut:
             if payload.payment_method_token:
                 raise HTTPException(400, "卡号与 payment_method 只能二选一")
             started = time.monotonic()
-            client = _team_client(secrets)
+            client = _team_client(secrets, address.get("country", ""))
             try:
                 pm_id = await asyncio.to_thread(
                     TeamHostedClient(client).tokenize,
@@ -731,3 +755,86 @@ async def get_order(order_id: str) -> OrderOut:
     if order is None:
         raise _error(status.HTTP_404_NOT_FOUND, ErrorCode.COMPLIANCE_BLOCKED, "订单不存在")
     return _to_out(order)
+
+# ── 纯协议支付（不依赖浏览器） ────────────────────────────────
+class ProtocolPayRequest(BaseModel):
+    """纯协议支付的入参。"""
+    card: CardIn
+    billing: BillingIn
+    proxy: Optional[str] = Field(default=None, max_length=300)
+
+
+class ProtocolPayOut(BaseModel):
+    """纯协议支付的结果。"""
+    state: str
+    code: Optional[str] = None
+    decline_code: Optional[str] = None
+    message: Optional[str] = None
+    intent_status: Optional[str] = None
+    charge_id: Optional[str] = None
+    payment_method_id: Optional[str] = None
+
+
+@router.post(
+    "/orders/{order_id}/pay-protocol",
+    response_model=ProtocolPayOut,
+    responses={400: {"model": ErrorOut}, 404: {"model": ErrorOut},
+               409: {"model": ErrorOut}, 502: {"model": ErrorOut}},
+)
+async def pay_order_protocol(order_id: str, payload: ProtocolPayRequest) -> ProtocolPayOut:
+    """纯 HTTP 协议完成 Stripe Checkout 支付，不需要浏览器。
+
+    链路：指纹注册 → init → elements/sessions → 逐字段地址
+          → hCaptcha(passive + challenge) → payment_methods → confirm → poll
+    """
+    order = store.get_order(order_id)
+    if order is None:
+        raise _error(status.HTTP_404_NOT_FOUND, ErrorCode.COMPLIANCE_BLOCKED, "订单不存在")
+    if order.status in {OrderStatus.DELIVERED, OrderStatus.ACTIVE}:
+        raise HTTPException(409, "订单已开通，无需重复支付")
+
+    view = store.view(order_id)
+    checkout_url = (getattr(view, "checkout_url", "") or "") if view else ""
+    if not checkout_url:
+        raise HTTPException(409, "订单缺少 checkout_url，请先创建结账")
+
+    settings = load_settings()
+    captcha_key = getattr(settings, "captcha_api_key", "") or ""
+    captcha_url = getattr(settings, "captcha_api_url", "https://api.yescaptcha.com")
+    proxy = payload.proxy or align_proxy_region(
+        configured_proxy("checkout"), payload.billing.country
+    )
+
+    card = payload.card.model_dump()
+    billing = {k: (v or "").strip() for k, v in payload.billing.model_dump().items()}
+    billing["country"] = (billing.get("country") or "US").upper()
+
+    def _run() -> PaymentOutcome:
+        sp = StripeProtocol(
+            proxy=proxy, captcha_key=captcha_key, captcha_url=captcha_url,
+            card=card, billing=billing,
+        )
+        try:
+            return sp.pay_from_url(checkout_url)
+        finally:
+            sp.close()
+
+    try:
+        outcome = await asyncio.to_thread(_run)
+    except DomainError as exc:
+        raise _from_domain(exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("protocol_pay_failed id=%s error=%s", order_id, str(exc)[:200])
+        raise _error(status.HTTP_502_BAD_GATEWAY, ErrorCode.CHECKOUT_UPSTREAM_ERROR, str(exc)[:200])
+
+    logger.info(
+        "protocol_pay id=%s state=%s decline=%s code=%s",
+        order_id, outcome.state, outcome.decline_code, outcome.code,
+    )
+    return ProtocolPayOut(
+        state=outcome.state, code=outcome.code,
+        decline_code=outcome.decline_code, message=outcome.message,
+        intent_status=outcome.intent_status, charge_id=outcome.charge_id,
+        payment_method_id=outcome.payment_method_id,
+    )
+

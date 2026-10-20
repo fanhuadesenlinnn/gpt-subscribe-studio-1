@@ -313,3 +313,116 @@ A: 50 个测试通过意味着：
 | `GSS_PRIVATE_DIR` | 存放 `container-auth.json`（访问密码）和 `proxy-config/` 的目录（必填，不要放进仓库） |
 | `GSS_COMPOSE_PROJECT` | compose 项目名，默认 `gpt-subscribe-studio` |
 | `GSS_PUBLIC_ORIGIN` | 选填，例如 `https://你的域名`。不填时按「请求 Origin 与 Host 同源」校验，部署到任何域名都能用 |
+
+---
+
+## hCaptcha Solver（可选，Team 协议支付需要）
+
+Stripe 的 checkout 在 confirm 阶段会要求 hCaptcha 验证。产 token 需要一个
+独立的浏览器服务，原因见 `tools/hcaptcha-solver/README.md`。
+
+### 为什么不能纯协议
+
+所有 stripe 域的 CSP 都缺 `'unsafe-eval'`：
+
+```
+pay.openai.com         ❌
+js.stripe.com          ❌
+b.stripecdn.com        ❌
+m.stripe.network       ❌
+newassets.hcaptcha.com ✅   ← 只有这里能跑 wasm
+```
+
+hCaptcha 的 wasm 只能在 `newassets.hcaptcha.com` 的 iframe 内实例化。
+
+### 安装
+
+```bash
+cd tools/hcaptcha-solver
+./install.sh
+```
+
+脚本会检查 Node.js / Chrome / Xvfb，缺什么提示什么。
+
+### 启动
+
+```bash
+./start.sh
+# → hCaptcha solver listening on http://127.0.0.1:8199
+```
+
+### 验证
+
+```bash
+curl -s http://127.0.0.1:8199/health
+# {"ok":true,"browser":"Chrome/155.0.8059.84"}
+```
+
+### 接到主服务
+
+```bash
+export HCAPTCHA_SOLVER_URL=http://127.0.0.1:8199
+```
+
+协议层会自动调用 `POST /solve` 拿 token。
+
+### systemd（生产）
+
+```ini
+# /etc/systemd/system/xvfb.service
+[Unit]
+Description=Xvfb for hCaptcha solver
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```ini
+# /etc/systemd/system/hcaptcha-solver.service
+[Unit]
+Description=hCaptcha token solver
+After=network.target xvfb.service
+Requires=xvfb.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/gss/tools/hcaptcha-solver
+Environment=DISPLAY=:99
+Environment=PORT=8199
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now xvfb hcaptcha-solver
+```
+
+### Docker（可选）
+
+如果偏好容器：
+
+```yaml
+services:
+  solver:
+    build:
+      context: ./tools/hcaptcha-solver
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:8199:8199"
+    shm_size: 1gb
+    security_opt:
+      - seccomp:unconfined
+    restart: unless-stopped
+```
+
+需要配套的 `Dockerfile`（自带 Chrome + Xvfb）。

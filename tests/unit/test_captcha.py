@@ -112,11 +112,30 @@ def test_verify_posts_token_with_client_secret():
     assert result["status"] == "succeeded"
     call = http.calls[0]
     assert call["url"].endswith("/v1/payment_intents/pi_fixture/verify_challenge")
-    assert call["headers"]["Origin"] == "https://pay.openai.com"
+    # Stripe.js posts verify_challenge, so the Origin is js.stripe.com here.
+    assert call["headers"]["Origin"] == "https://js.stripe.com"
     body = call["data"]
     assert "challenge_response_token=P1_token" in body
     assert "captcha_vendor_name=hcaptcha" in body
     assert "_stripe_version=2026-03-25.dahlia" in body
+
+
+def test_verify_includes_ekey_when_present():
+    http = HTTP([{"status": "succeeded"}])
+    verify_challenge(http, intent_id="pi_fixture", client_secret="pi_fixture_secret_x",
+                     token="P1_token", publishable_key="pk_live_x",
+                     api_version="2025-03-31.basil", ekey="ek_live_fixture")
+    body = http.calls[0]["data"]
+    # hCaptcha hands back an ekey; Stripe.js forwards it as captcha_response_key.
+    assert "captcha_response_key=ek_live_fixture" in body
+
+
+def test_verify_omits_ekey_when_empty():
+    http = HTTP([{"status": "succeeded"}])
+    verify_challenge(http, intent_id="pi_fixture", client_secret="pi_fixture_secret_x",
+                     token="P1_token", publishable_key="pk_live_x",
+                     api_version="2025-03-31.basil")
+    assert "captcha_response_key" not in http.calls[0]["data"]
 
 
 def test_verify_surfaces_stripe_error():

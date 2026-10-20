@@ -11,7 +11,9 @@ app = create_app()
 app.add_middleware(
     TestAccessMiddleware,
     credentials_file=os.environ["GSS_AUTH_FILE"],
-    login_file="/app/login.html",
+    login_file=os.environ.get("GSS_LOGIN_FILE", "/app/login.html"),
     origin=os.environ.get("GSS_PUBLIC_ORIGIN", ""),
 )
-app.mount("/", StaticFiles(directory="/app/web", html=True), name="web")
+app.mount("/", StaticFiles(
+    directory=os.environ.get("GSS_WEB_DIR", "/app/web"), html=True
+), name="web")

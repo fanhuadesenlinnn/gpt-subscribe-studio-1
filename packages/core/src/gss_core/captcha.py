@@ -170,8 +170,14 @@ def verify_challenge(
     token: str,
     publishable_key: str,
     api_version: str,
+    ekey: str = "",
 ) -> Dict[str, Any]:
-    """Post the solved token to Stripe's verify_challenge endpoint."""
+    """Post the solved token to Stripe's verify_challenge endpoint.
+
+    ekey 是 hCaptcha 随 token 一起下发的密钥，Stripe.js 的
+    VERIFY_CAPTCHA_CHALLENGE 会把它作为 captcha_response_key 一并回传
+    （见 js.stripe.com/v3/fingerprinted/js/hcaptcha-inner-*.js）。
+    """
     if not intent_id.startswith("pi_") or not client_secret.startswith("pi_"):
         raise DomainError(ErrorCode.PAYMENT_UNKNOWN_STATE, "缺少支付意图凭据，无法完成验证")
     body = {
@@ -181,7 +187,11 @@ def verify_challenge(
         "key": publishable_key,
         "_stripe_version": api_version,
     }
-    headers = {"Origin": "https://pay.openai.com", "Referer": "https://pay.openai.com/",
+    if ekey:
+        body["captcha_response_key"] = ekey
+    # HAR: verify_challenge is posted by Stripe.js, so its Origin is js.stripe.com —
+    # unlike init/confirm/poll which post from pay.openai.com.
+    headers = {"Origin": "https://js.stripe.com", "Referer": "https://js.stripe.com/",
                "Content-Type": "application/x-www-form-urlencoded",
                "User-Agent": DEFAULT_UA}
     from urllib.parse import urlencode

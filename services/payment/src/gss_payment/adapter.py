@@ -82,18 +82,23 @@ class UpstreamPaymentAdapter(PaymentAdapterBase):
         if not checkout_id:
             raise DomainError(ErrorCode.PAYMENT_DECLINED, "缺少 checkout_session_id")
 
+        # The exit must match the billing country of the payment method. A checkout
+        # created for one region but billed to another otherwise looks inconsistent to
+        # Stripe and forces an extra verification step.
+        billing_country = str((req.billing or {}).get("country") or "").upper()
+        target_country = billing_country if str(req.plan or "").lower() == "team" and billing_country else req.country
         proxy = align_proxy_region(
             req.checkout_proxy
             or req.approve_proxy
-            or session_proxy("checkout", req.country)
+            or session_proxy("checkout", target_country)
             or configured_proxy("checkout")
             or configured_proxy("approve"),
-            req.country,
+            target_country,
         )
         client = ChatGPTClient.from_raw_session(req.session, proxy=proxy)
         client.timeout = float(self.timeout)
-        client.language = locale_for(req.country)
-        client.timezone = timezone_for(req.country)
+        client.language = locale_for(target_country)
+        client.timezone = timezone_for(target_country)
         if str(req.plan or "").lower() == "team" and public_checkout_id(checkout_id).startswith("cs_"):
             try:
                 return await asyncio.to_thread(self._pay_team, client, req)
