@@ -2281,3 +2281,144 @@ indices: [2,5,6]
 
 需要在视觉侧加一层「题目-格子语义一致性检查」：
 若 example 与所有 tiles 完全不相关，则判定为不支持的题型，直接 Skip 换题。
+
+---
+
+## 二十七、第二十二轮：指纹自洽化改造，passive 提速一倍
+
+### 27.1 两边的真实指纹对比（首次完整测量）
+
+| 信号 | 本机 macOS | 服务器 Linux（改造前） | 矛盾 |
+|---|---|---|---|
+| `gl_prec` mediump | `23/127/127` | **`10/15/15`** | GPU 驱动真实差异 |
+| `canvas_text_hash` | `2083551817` | `-2050866750` | 字体渲染完全不同 |
+| `outer` / `inner` | `1440×900` / `1440×757` | **`945×1060`** / `1440×900` | 外尺寸 < 内尺寸，物理不可能 |
+| `avail` / `screen` | `1710×1074` / `1710×1112` | `1920×1080` / `1920×1080` | 相等 = 无窗口管理器 |
+| `dpr` | **2** | 1 | 与 1920×1080 不匹配 |
+| `colorDepth` | **30** | 24 | |
+| 字体数 | 13（含 Georgia/Verdana/Impact/PingFang） | **6** | 真实系统至少 15+ |
+| 循环性能 | 11845 /ms | **1453 /ms** | 慢 8 倍 |
+| `platform` | `MacIntel` | `Win32`（伪造） | UA 说 Windows，其余全是 Linux 值 |
+
+### 27.2 本轮四项改造
+
+**A. 安装 openbox 窗口管理器**
+
+```bash
+apt-get install -y openbox fonts-liberation fonts-noto-core fonts-dejavu-core
+DISPLAY=:99 openbox &
+```
+
+**B. 字体别名配置**（`/etc/fonts/conf.d/99-win-alias.conf`）
+
+```xml
+Arial          → Liberation Sans
+Times New Roman→ Liberation Serif
+Courier New    → Liberation Mono
+Verdana        → DejaVu Sans
+Tahoma         → DejaVu Sans
+Trebuchet MS   → DejaVu Sans
+Impact         → Noto Sans
+Comic Sans MS  → DejaVu Sans
+Georgia        → DejaVu Serif
+```
+
+字体数从 **6 → 13**，覆盖了 Windows 常见列表。
+
+**C. 窗口尺寸自洽**
+
+```
+原：--window-size=1440,900 在 1920×1080 屏幕上
+    → outer=945x1060, inner=1440x900   （矛盾）
+新：--window-size=1900,1010 --window-position=0,0
+    → outer=1900x1010, inner=1900x923  （自洽）
+```
+
+**D. 放弃 Windows 伪装，改为如实报告 Linux**
+
+之前的策略是「UA 说 Windows + platform 说 Win32」，
+但 WebGL 精度、字体、canvas 哈希全是 Linux 真值，交叉验证立刻露馅。
+
+改为全套自洽的 Linux 指纹：
+
+```
+UA       Chrome 原生 Linux UA
+platform Linux x86_64
+uaData   platform='Linux', platformVersion='6.8.0'
+```
+
+**核心理由：自洽的真话比矛盾的谎话更难识破。**
+
+### 27.3 改造后的指纹
+
+```json
+{
+ "gl_prec": "highp:23/127/127 mediump:10/15/15",
+ "canvas_text_hash": -1598100664,
+ "screen": "1920x1080", "avail": "1920x1080",
+ "dpr": 1, "colorDepth": 24,
+ "outer": "1900x1010", "inner": "1900x923",
+ "platform": "Linux x86_64",
+ "fonts": "Arial,Helvetica,Times New Roman,Courier New,Georgia,Verdana,
+           Tahoma,Trebuchet MS,Comic Sans MS,DejaVu Sans,Liberation Sans,Segoe UI",
+ "timing_precision": "1.000000 loops=1999"
+}
+```
+
+对比改造前：
+
+| 项 | 前 | 后 |
+|---|---|---|
+| outer/inner | 945×1060 / 1440×900 ❌ | 1900×1010 / 1900×923 ✅ |
+| platform | Win32（矛盾） | Linux x86_64（自洽） |
+| 字体数 | 6 | **13** |
+| canvas hash | -2050866750 | -1598100664（随字体变化） |
+| loops | 1453 | 1999 |
+
+### 27.4 效果：passive 提速一倍
+
+```
+改造前  24ed0064  14–25s   ✅ 3/3
+改造后  24ed0064  13.1–13.6s  ✅ 3/3      ← 快了近一倍
+```
+
+**passive 的耗时几乎减半**，说明指纹自洽确实降低了风控评分。
+
+### 27.5 c7faac4c 仍然出题
+
+```
+#1 52.7s  Tap on the item that travels in the same area
+#2 52.5s  Drag the correct animal into its matching outline
+→ 成功 0/2
+```
+
+题型还是图像题（9 宫格 / 拖拽）。
+
+### 27.6 结论
+
+**指纹自洽化是有效方向，但不是充分条件。**
+
+- ✅ 降低了风险评分（passive 提速一倍）
+- ❌ 没有改变 `c7faac4c` 的判定（二次挑战仍强制人工）
+
+剩下的硬差异：
+
+```
+mediump 精度  10/15/15 vs 23/127/127   ← Mesa llvmpipe 真实值，JS 改不了
+循环性能      1999 vs 11845 /ms        ← CPU 性能真实差异
+```
+
+这两条只能靠**真实 GPU 或指纹浏览器内核**解决。
+
+### 27.7 关于 RoxyBrowser
+
+服务器当前状态：
+
+```
+Ubuntu 24.04 / x86_64 / 8 核 / 31G 内存 / 168G 空闲
+xvfb ✅  openbox ✅  401 个字体 ✅
+RoxyBrowser 未安装（无安装包，官方站点在本机网络不可达）
+```
+
+指纹浏览器内核能伪造 `mediump` 精度和 canvas 噪声，
+这是本轮剩余两个硬差异之一。**装上后需实测 `c7faac4c` 是否变好。**

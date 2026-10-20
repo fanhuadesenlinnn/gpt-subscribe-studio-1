@@ -571,6 +571,10 @@ async function launchBrowser(proxy) {
         : ['--use-gl=angle', '--use-angle=gl', '--enable-unsafe-swiftshader',
            '--enable-features=Vulkan', '--disable-gpu-sandbox']),
       '--ignore-gpu-blocklist',
+      // 窗口尺寸与 Xvfb(1920x1080) 自洽，避免 outer/inner/avail 矛盾
+      '--window-position=0,0',
+      '--window-size=1900,1010',
+      ...(process.env.CHROME_EXTRA_ARGS || '').split(' ').filter(Boolean),
       '--disable-blink-features=AutomationControlled',
       // 注意：不要加 --disable-features=IsolateOrigins,site-per-process
       // 它会让所有 iframe 与主页面共享进程，hCaptcha 的 wasm/vm 在共享进程里
@@ -582,7 +586,11 @@ async function launchBrowser(proxy) {
       ...(p.server ? [`--proxy-server=${p.server}`] : []),
     ],
     ignoreDefaultArgs: ['--enable-automation'],
-    defaultViewport: { width: 1440, height: 900 },
+    // 窗口尺寸要与 Xvfb 屏幕(1920x1080)自洽：
+    // 之前 window-size=1440,900 在 1920x1080 屏幕上产生
+    // outer=945x1060 / inner=1440x900 / avail=1920x1080 的矛盾组合，
+    // 这是最明显的 headless 特征。改为贴近屏幕尺寸并留出 openbox 装饰。
+    defaultViewport: null,
     protocolTimeout: 240000,
   });
 }
@@ -630,7 +638,7 @@ class Session {
       await cdp.send('Emulation.setUserAgentOverride', {
         userAgent: this.ua,
         acceptLanguage: 'en-US,en',
-        platform: 'Win32',
+        platform: 'Linux x86_64',
         userAgentMetadata: {
           brands: [
             { brand: 'Google Chrome', version: '155' },
@@ -643,8 +651,8 @@ class Session {
             { brand: 'Not=A?Brand', version: '24.0.0.0' },
           ],
           fullVersion: '155.0.8059.84',
-          platform: 'Windows',
-          platformVersion: '10.0.0',
+          platform: 'Linux',
+          platformVersion: '6.8.0',
           architecture: 'x86',
           model: '',
           mobile: false,
@@ -669,14 +677,17 @@ class Session {
     //   navigator.userAgentData.brands 为空数组
     // hCaptcha 的 identity 校验会看这些。全部对齐到「Windows 10 + 真实 NVIDIA GPU」。
     await this.page.evaluateOnNewDocument(() => {
-      const UA_WIN = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-                     '(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36';
+      // 策略改变：不再伪装成 Windows。
+      // 之前 UA 说 Windows、platform 说 Win32，但 WebGL 精度/字体/canvas 哈希
+      // 全是 Linux 真值，交叉验证立刻露馅。
+      // 现在改为「如实报告 Linux」，让所有信号自洽——自洽的真话比矛盾的谎话更难识破。
+      const UA_LINUX = navigator.userAgent;   // 使用 Chrome 原生 Linux UA
 
       // 1) webdriver 必须是 false（不是 undefined —— 真实浏览器有这个属性且为 false）
       Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true });
 
-      // 2) platform 跟 UA 对齐
-      Object.defineProperty(navigator, 'platform', { get: () => 'Win32', configurable: true });
+      // 2) platform 如实报告 Linux
+      Object.defineProperty(navigator, 'platform', { get: () => 'Linux x86_64', configurable: true });
       Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.', configurable: true });
       Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'], configurable: true });
 
