@@ -1803,17 +1803,36 @@ const server = http.createServer(async (req, res) => {
           if (gridCells.length >= 4) {
             ans = await s.answerChallenge(idx);
           } else {
-            // 无 aria 时按几何布局推算：3x3 网格在截图下部
-            const coords = idx.map((k) => {
-              const col = k % 3, row = Math.floor(k / 3);
-              return [(col + 0.5) / 3, 0.42 + row * 0.19];
-            });
+            // 无 aria 时按几何布局推算 3x3 格子中心。
+            // 系数由实测截图 (520x570) 标定：
+            //   列中心 x = 145/260/375  →  0.279 / 0.500 / 0.721
+            //   行中心 y = 213/300/388  →  0.374 / 0.526 / 0.681
+            const XS = [0.279, 0.500, 0.721];
+            const YS = [0.374, 0.526, 0.681];
+            const coords = idx.map((k) => [XS[k % 3], YS[Math.floor(k / 3)]]);
             ans = await s.clickInFrame(coords);
           }
           const result = { phase: 'grid_answered', prompt, indices: idx, ans, gv };
           if (ans && ans.error) return result;
           await sleep(400);
           result.submit = await s.submitChallenge();
+          // 点击后立刻截图，确认格子被选中（边框变色）
+          try {
+            const el2 = await s.page.$('iframe[src*="frame=challenge"]');
+            if (el2) {
+              const b2 = await el2.boundingBox();
+              if (b2) {
+                result.afterShot = await s.page.screenshot({
+                  clip: { x: Math.max(0, b2.x), y: Math.max(0, b2.y),
+                          width: Math.min(b2.width, 2000),
+                          height: Math.min(b2.height, 2000) },
+                  encoding: 'base64' });
+                require('node:fs').writeFileSync(
+                  '/tmp/after_grid_' + Date.now() + '.png',
+                  Buffer.from(result.afterShot, 'base64'));
+              }
+            }
+          } catch (_) {}
           const until = now() + Number(body.wait_ms || 60000);
           while (now() < until) {
             await sleep(1000);
@@ -1837,19 +1856,37 @@ const server = http.createServer(async (req, res) => {
         // 压缩：canvas dataURL 可能 1.4MB，直接用 fetch 会失败。
         // 在页面内用 OffscreenCanvas 缩到宽 600 再传。
         let pngData = main.dataUrl;
+        // 缩图必须在 challenge frame 内做（canvas 在那个 frame 里，
+        // 主页面拿到 dataUrl 后重新解码会占用大量内存且容易失败）。
         try {
           const shrunk = await s.page.evaluate(async (cfg) => {
             const im = new Image();
-            await new Promise((ok, bad) => { im.onload = ok; im.onerror = bad; im.src = cfg.du; });
-            const scale = Math.min(1, 600 / im.width);
+            im.crossOrigin = 'anonymous';
+            await new Promise((ok, bad) => {
+              im.onload = ok; im.onerror = () => bad(new Error('img_load'));
+              im.src = cfg.du;
+            });
+            const maxW = 720;
+            const scale = Math.min(1, maxW / im.width);
             const c = document.createElement('canvas');
-            c.width = Math.round(im.width * scale);
-            c.height = Math.round(im.height * scale);
-            c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
-            return c.toDataURL('image/png');
+            c.width = Math.max(1, Math.round(im.width * scale));
+            c.height = Math.max(1, Math.round(im.height * scale));
+            const g = c.getContext('2d');
+            g.drawImage(im, 0, 0, c.width, c.height);
+            // 用 JPEG 进一步压缩（题目图不需要无损）
+            return c.toDataURL('image/jpeg', 0.82);
           }, { du: main.dataUrl });
-          if (shrunk && shrunk.length > 1000) pngData = shrunk;
-        } catch (_) {}
+          if (shrunk && shrunk.length > 2000) {
+            pngData = shrunk;
+            console.log('   [line] shrunk', main.dataUrl.length, '→', shrunk.length);
+          }
+        } catch (e) {
+          console.log('   [line] shrink failed:', String(e).slice(0, 120));
+        }
+        if (pngData.length > 900000) {
+          console.log('   [line] payload still too big:', pngData.length);
+          return { phase: 'vision_payload_too_big', prompt, size: pngData.length };
+        }
         let vis = null;
         try {
           const vr = await fetch(visionUrl, {

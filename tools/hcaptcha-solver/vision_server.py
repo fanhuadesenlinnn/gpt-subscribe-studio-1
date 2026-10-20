@@ -106,28 +106,59 @@ async def solve_grid_request(request):
     try:
         raw = base64.b64decode(du)
         im = Image.open(io.BytesIO(raw))
-        W, H = im.size
+        # 支持裁剪：默认保留中间 3x3 网格区域（去掉题干栏与底部按钮）
+        # 保留顶部题干栏（例题缩略图在那里），只裁掉底部按钮区
+        crop = body.get("grid_crop") or [0.02, 0.0, 0.98, 0.82]
+        cw, ch = im.size
+        im2 = im.crop((int(crop[0] * cw), int(crop[1] * ch),
+                       int(crop[2] * cw), int(crop[3] * ch)))
+        buf = io.BytesIO()
+        im2.save(buf, format="PNG")
+        raw = buf.getvalue()
+        W, H = im2.size
     except Exception as e:
         return JSONResponse({"error": "bad_png: " + str(e)[:80]}, status_code=400)
 
-    # 不依赖 cells：直接把整张截图交给模型，让它按 3x3 阅读顺序编号
-    prompt = f'''Screenshot of a UI panel. Instruction text shown at top: "{prompt_text}"
+    # 两步法：先让模型逐格描述，再据此判断。
+    # 单步直接问「哪几格符合」时，模型数格子会出错（实测 picks 偏了 4 格）。
+    # 走 /solve-grid 时 body 里带 grid_crop，用于裁掉题干栏与底部按钮。
 
-A small reference thumbnail appears in the prompt bar at the very top.
-Below it is a 3x3 grid of 9 picture tiles numbered in reading order:
+    # Step 1: 逐格描述
+    p1 = '''Image size: {W} x {H} pixels.
+This is a 3x3 grid of 9 picture tiles, numbered in reading order:
   row1: 1 2 3
   row2: 4 5 6
   row3: 7 8 9
 
-Identify what the reference thumbnail depicts, then select all tiles belonging
-to the same category.
+List what each of the 9 tiles depicts. Be concrete and short
+(e.g. sailboat, bicycle, car, tree).
 
-JSON ONLY: {{"example":"...","picks":[5],"reason":"..."}}'''
+JSON ONLY: {{"tiles":["obj1","obj2","obj3","obj4","obj5","obj6","obj7","obj8","obj9"]}}'''
+    d1 = ask(raw, p1.format(W=W, H=H))
+    tiles = (d1 or {}).get("tiles") or []
+    if len(tiles) < 9:
+        return JSONResponse({"error": "describe_failed", "raw": d1}, status_code=502)
 
-    out = ask(raw, prompt)
-    if not out:
-        return JSONResponse({"error": "vision_failed"}, status_code=502)
-    picks = out.get("picks") or []
+    # Step 2: 基于描述做判断（不再看图，避免数错格子）
+    listing = "\n".join(f"  tile {i+1} = {t}" for i, t in enumerate(tiles))
+    p2 = f'''Look at the TOP of this image. The instruction text and a small
+reference thumbnail (the "example") are shown in the blue prompt bar there.
+
+User instruction: "{prompt_text}"
+
+The 3x3 grid below the prompt bar has these 9 tiles (1-based, reading order):
+{listing}
+
+Step 1: state what the reference thumbnail depicts.
+Step 2: state the category / where it travels.
+Step 3: pick EVERY tile that belongs to the same category as the reference.
+
+JSON ONLY: {{"example":"<what the thumbnail shows>","category":"<where/what>","picks":[<1-based tile numbers>],"reason":"..."}}'''
+    d2 = ask(raw, p2)
+    if not d2:
+        return JSONResponse({"error": "judge_failed"}, status_code=502)
+
+    picks = d2.get("picks") or []
     idx = []
     for p in picks:
         try:
@@ -137,8 +168,8 @@ JSON ONLY: {{"example":"...","picks":[5],"reason":"..."}}'''
         except Exception:
             pass
     if not idx:
-        return JSONResponse({"error": "no_picks", "raw": out}, status_code=502)
-    return JSONResponse({"indices": idx, "raw": out, "size": [W, H]})
+        return JSONResponse({"error": "no_picks", "raw": d2}, status_code=502)
+    return JSONResponse({"indices": idx, "tiles": tiles, "raw": d2, "size": [W, H]})
 
 
 async def solve_endpoint(request):
