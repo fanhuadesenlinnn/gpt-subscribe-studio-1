@@ -258,13 +258,27 @@ export function ProtocolPayPanel({
           </Text>
           {country && country.toUpperCase() !== "US" && (
             <Alert color="orange" variant="light" icon={<IconAlertCircle size={16} />}>
-              订单地区是 {country.toUpperCase()}，但账单地址固定为美国免税州。
-              出口会按账单国家对齐到 US。要跑其他国家请新建订单时选择对应地区。
+              订单地区是 {country.toUpperCase()}，但账单地址默认是美国免税州。
+              出口会按账单国家对齐到 US。要跑其他国家请把地址改成对应国家，
+              或新建订单时选择对应地区。
             </Alert>
           )}
           <SimpleGrid cols={{ base: 1, xs: 2 }}>
             <TextInput label="持卡人姓名" value={billing.name} onChange={changeBilling("name")} disabled={busy} />
-            <TextInput label="邮箱" value={billing.email ?? ""} onChange={changeBilling("email")} disabled={busy} />
+            <TextInput
+              label="邮箱"
+              value={billing.email ?? ""}
+              onChange={changeBilling("email")}
+              disabled={busy}
+              placeholder="name@example.com"
+              description={
+                !sessionEmail
+                  ? "accessToken 里没解析到邮箱，请手动填写"
+                  : (billing.email ?? "").trim() === sessionEmail.trim()
+                    ? "已从 accessToken 自动填入，可直接修改"
+                    : `已手动修改；账户邮箱是 ${sessionEmail}`
+              }
+            />
           </SimpleGrid>
           <TextInput label="街道地址" value={billing.line1} onChange={changeBilling("line1")} disabled={busy} />
           <SimpleGrid cols={{ base: 1, xs: 3 }}>
