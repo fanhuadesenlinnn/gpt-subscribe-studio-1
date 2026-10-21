@@ -1642,6 +1642,34 @@ class Session {
   }
 
   /** 读取 __reaPending 里保存的结果（超时后 execute 仍可能在跑）。 */
+  /** 点挑战里的 Skip 换一道题（拖拽题不值得花打码额度）。 */
+  async skipChallenge() {
+    const cands = this.page.frames().filter((f) => /challenge|newassets/.test(f.url()));
+    for (const f of cands) {
+      try {
+        const sel = '[aria-label*="Skip" i], div[role=button][aria-label*="Skip" i]';
+        const el = await f.$(sel);
+        if (el) {
+          await el.click();
+          return true;
+        }
+      } catch (_) {}
+    }
+    // 退路：按文本找 Skip
+    for (const f of cands) {
+      try {
+        const ok = await f.evaluate(() => {
+          const els = [...document.querySelectorAll('div,button,span')];
+          const t = els.find((d) => (d.textContent || '').trim().toLowerCase() === 'skip');
+          if (t) { t.click(); return true; }
+          return false;
+        });
+        if (ok) return true;
+      } catch (_) {}
+    }
+    return false;
+  }
+
   /** 轮询等待 token（点完 Next/Verify 后需要时间才回来）。 */
   async waitToken(timeoutMs = 20000) {
     const t0 = Date.now();
@@ -1932,7 +1960,33 @@ const server = http.createServer(async (req, res) => {
           } catch (e) {}
         }
 
-        const isDrag = /drag/i.test(question);
+        let isDrag = /drag/i.test(question);
+        let skipTimes = 0;
+        let curPrompt = question;
+        let chCur = ch;
+        while (isDrag && skipTimes < 4) {
+          const ok = await s.skipChallenge();
+          skipTimes++;
+          if (!ok) break;
+          await sleep(1800);
+          const nx = await s.captureChallenge().catch(() => null);
+          if (!nx) break;
+          chCur = nx;
+          curPrompt = String(nx.prompt || '')
+            .replace(/Please select an image to report\.?/gi, '')
+            .replace(/Please try again\.?/gi, '').replace(/\s+/g, ' ').trim();
+          isDrag = /drag/i.test(curPrompt);
+        }
+        if (isDrag) {
+          return { phase: 'skipped_drag', question: curPrompt,
+                   skips: skipTimes, cost: 0 };
+        }
+        const question2 = curPrompt;
+        if (question2 && question2 !== question) {
+          // 换题后用新的题干与新的画布
+          question = question2;
+          ch = chCur;
+        }
         const cv0 = (ch.canvases || [])[0];
         if (!cv0 || !cv0.jpg) return { phase: 'error', error: 'no_canvas', question };
         const oneQuery = [String(cv0.jpg).split(',').pop()];
