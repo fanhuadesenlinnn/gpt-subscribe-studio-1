@@ -107,7 +107,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18120/            # 30
 
 # 完整支付链路（纯协议）
 cd /opt/gss/app && set -a && . .env && . ./cards.env && set +a
-GSS_PUBLIC_ORIGIN=https://<YOUR_ORIGIN>t PLAN=team \
+GSS_PUBLIC_ORIGIN=https://<PAY_HOST>t PLAN=team \
   .venv/bin/python /opt/gss/scripts/run_sp_test.py
 ```
 

@@ -43,7 +43,7 @@ async function pickPage() {
   const want = arg('target');
   if (want) return pages.find((t) => (t.url || '').includes(want)) || pages[0];
   // 优先 <YOUR_ORIGIN> / pay.openai.com
-  return pages.find((t) => /pay\.(<PAY_HOST>\.shop|openai\.com)/.test(t.url || '')) || pages[0];
+  return pages.find((t) => /pay\.(<PAY_HOST>|openai\.com)/.test(t.url || '')) || pages[0];
 }
 
 class CDP {
