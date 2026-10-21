@@ -10,6 +10,7 @@
 ## 目录
 
 - [现在是什么](#现在是什么)
+- [支持的档位](#支持的档位)
 - [协议链路](#协议链路)
 - [实测数据](#实测数据)
 - [快速开始](#快速开始)
@@ -29,7 +30,10 @@
 
 一套自托管的 Stripe 结账协议客户端。前端只做表单与结果展示，所有与 Stripe 的交互都在服务端完成。
 
-### 链路
+覆盖六个订阅档位，但**纯协议链路只适用于 Team**（hosted checkout）。
+Plus / Go / Pro 家族走的是 custom checkout，链路不同，见「支持的档位」。
+
+### 链路（Team）
 
 ```
 粘贴 ChatGPT accessToken
@@ -46,7 +50,72 @@
 
 ---
 
+## 支持的档位
+
+六个档位分成两族，**结账类型不同，支付链路也完全不同**。
+
+| 档位 | 代码 | 挂牌价 | 结账类型 | 会话 id | 支付入口 |
+|---|---|---|---|---|---|
+| Plus | `plus` | $20 / 月 | custom | `oaics_` | `/pay` 编排管线 |
+| Go | `go` | $8 / 月 | custom | `oaics_` | `/pay` |
+| Pro Lite | `pro_lite` | $100 / 月 | custom | `oaics_` | `/pay` |
+| Pro | `pro` | $200 / 月 | custom | `oaics_` | `/pay` |
+| Pro Max | `pro_max` | $500 / 月 | custom | `oaics_` | `/pay` |
+| Team | `team` | $25 / 席 / 月 | hosted | `cs_live_` | **`/pay-protocol` 纯协议** |
+
+### Plus 家族（custom checkout）
+
+- 结账地址是 `https://chatgpt.com/checkout/…`，会话 id 前缀 `oaics_`
+- **没有** `publishable_key`
+- 支付要分两步：先向 ChatGPT 的 `/payments/checkout/confirm` 提交确认，
+  拿到 PaymentIntent 后再向 Stripe 确认这个 intent
+- 确认需要一个 confirmation token（`ctoken_`），由 Stripe Elements 在浏览器端产出
+
+### Team（hosted checkout）
+
+- 结账地址是 `https://pay.openai.com/c/pay/cs_live_…`，会话 id 前缀 `cs_live_`
+- 有 `publishable_key`
+- 支付直接打 Stripe 的 `payment_pages/{cs}/confirm`，不需要经过 ChatGPT 内部接口
+- 这是本仓库纯协议链路的适用范围
+
+### 两者在参数上的差异
+
+| 项目 | Plus 家族 | Team |
+|---|---|---|
+| 账单国家 | 必须与建单地区一致，不一致直接报 `billing_country_mismatch` | 可独立选择，仅需在支持列表内 |
+| 席位数量 | 不涉及 | 2 席起，可配 |
+| 月付 / 年付 | 固定 | 可选 |
+| 工作空间名 | 不涉及 | 可填 |
+| 优惠码 | 取决于 `GSS_ENABLE_PROMO` | 同 |
+
+### 支持的国家 / 地区（25 个）
+
+```
+US PH CL EG JP GB TR BR MX IN ID VN TH MY SG KR AU CA DE NL PL AR SA AE ZA
+```
+
+每个地区绑定币种，建单时决定结账币种。完整表在 `packages/core/src/gss_core/countries.py`。
+
+### 当前实现状态
+
+纯协议链路（`/pay-protocol`）只覆盖 **Team**。它从结账地址里取 `cs_live_`，
+而 Plus 家族的地址里是 `oaics_`，取不到 —— 对 Plus 订单调用会返回：
+
+```
+502 checkout_upstream_error
+URL 里没有 cs_live_: https://chatgpt.com/checkout/oaics_…
+```
+
+Plus 家族目前只有 `/pay` 编排管线这一条路，它依赖浏览器产出的 `ctoken_`。
+浏览器路线归档后，Web 界面上 Plus 家族没有可用的支付入口 —— 这一条列在
+「未解决的问题」里。
+
+
+---
+
 ## 协议链路
+
+以下链路适用于 **Team（hosted checkout）**。
 
 ### 默认模式（与批量脚本一致）
 
@@ -427,6 +496,16 @@ confirm 请求里带一个 `rv_timestamp`：**212 字符**，字符集 43 个符
 已知：勾选 `tax_region` 后后端会同步刷新 `expected_amount`。
 缺：前端在提交前后拿到的是两个不同来源的金额（报价 vs init），
 金额变化时是否要中断并要求刷新报价，还没定。
+
+**7. Plus 家族在 Web 界面上没有支付入口**
+
+已知：Plus / Go / Pro 家族的结账是 custom 类型（`oaics_`），
+支付要 `ctoken_`（Stripe Elements 在浏览器产出）走 `/pay` 编排管线；
+而纯协议端点只认 `cs_live_`，对 Plus 订单直接返回 502。
+缺：一个不依赖浏览器的 Plus 支付路径 —— 后端已有
+`create_confirmation_token(publishable_key, payment_method=pm_)`
+可以把服务端造的 `pm_` 换成 `ctoken_`，但没有接到文案与界面里，
+也没有端到端跑通过。
 
 ---
 
