@@ -168,10 +168,10 @@ publishable_key: Optional[str] = Field(default=None, max_length=120)
 4 张卡全部拿到拒卡：
 
 ```
-[A] <CARD>  card_declined  generic_decline
-[B] <CARD>  card_declined  generic_decline
-[C] <CARD>  card_declined  generic_decline
-[D] <CARD>  card_declined  ChatGPT 侧确认 failed
+[A] card_declined  generic_decline
+[B] card_declined  generic_decline
+[C] card_declined  generic_decline
+[D] card_declined  ChatGPT 侧确认 failed
 ```
 
 单次约 14 秒。
