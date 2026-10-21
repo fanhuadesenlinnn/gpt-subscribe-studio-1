@@ -2768,3 +2768,76 @@ plus  → https://chatgpt.com/checkout/openai_llc/oaics_...
 而 Stripe 的挑战在本流程下每次都下发，无法靠降低评分规避。
 
 因此「全协议（无浏览器） + 打码代拿 token」这个组合在该挑战上不成立。
+
+## 三十一、全协议路径的边界（2026-10-21 第 27 轮实测）
+
+### 31.1 confirm 不需要浏览器
+
+`passive_captcha_token` 这个字段可以**完全不传**，confirm 照样返回 200：
+
+```
+省略 passive_captcha_token  → 200，返回 intent_confirmation_challenge
+传空串                      → 200，同上
+传真实 token（Camoufox）    → 200，同上
+```
+
+也就是说：纯 HTTP 即可走到 confirm，浏览器只影响后续能否过挑战，不影响能否到达这一步。
+
+### 31.2 confirm 的参数集是锁死的
+
+实测以下参数全部被拒（`parameter_unknown`），无法用它们绕过挑战：
+
+| 尝试的参数 | 结果 |
+|---|---|
+| `off_session=true` | `Received unknown parameter: off_session` |
+| `payment_method_options[card][request_three_d_secure]=any` | `Received unknown parameter: payment_method_options` |
+| `payment_method_options[card][moto]=true` | 同上 |
+| `setup_future_usage=off_session` | `Received unknown parameter: setup_future_usage` |
+
+payment_pages/confirm 只接受它认的那一组字段，商户发起 / MOTO / 强制 3DS 这些豁免手段都用不上。
+
+### 31.3 `rv_timestamp` 不是挑战开关
+
+从 HAR（`48teamchatgpt.com.har`，605 条记录）提取真实 confirm 请求体，逐字段对比：
+
+```
+真实体字段（15 个）
+  _stripe_version / client_attribution_metadata×5 / consent[terms_of_service]
+  eid / expected_amount / expected_payment_method_type / guid / key
+  link_brand / muid / passive_captcha_token / payment_method / rv_timestamp
+```
+
+唯一我们探针缺失的是 `rv_timestamp`（212 字符，43 个字符的字符集）。
+它**只出现在 confirm 请求里，任何响应里都没有** —— 是 Stripe.js 客户端生成的，不是服务端下发。
+
+补上以后 4/4 仍然是 `intent_confirmation_challenge`。所以它不是挑战开关。
+
+### 31.4 挑战的实际触发率
+
+本会话内累计 confirm 调用约 36 次，结果分布：
+
+```
+intent_confirmation_challenge   约 34 次  （94%）
+直接 card_declined / generic_decline   约 2 次  （6%）
+```
+
+期间尝试过的所有降评分手段（全部无效）：
+
+```
+m.stripe.com/6 × 4 完整指纹注册
+UA 全链路统一为 Linux Chrome 155（passive 因此从 27.1s 降到 5.8s）
+rv_timestamp 补齐
+passive token 省略 / 空串 / 真实值
+换产品线（plus 走 chatgpt.com 自定义结账，被 Cloudflare 403）
+```
+
+### 31.5 全协议可以交付的形态
+
+```
+建单 → init → pm → confirm（纯 HTTP，无浏览器）
+  ├─ 6%  → card_declined/generic_decline    ← 拿到卡片结果
+  └─ 94% → intent_confirmation_challenge    ← 直接丢弃，不调打码、不开浏览器
+```
+
+单次成本：一次 confirm + 若干 Stripe API 调用，无打码费用、无浏览器开销。
+要提高产出只能靠换商户/换结账流程，而不是改我们自己这边的信号。
