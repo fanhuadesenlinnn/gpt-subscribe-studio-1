@@ -530,3 +530,7 @@ confirm 请求里带一个 `rv_timestamp`：**212 字符**，字符集 43 个符
 
 探索过程记录在 [docs/exploration-log-browser-route.md](./docs/exploration-log-browser-route.md)，
 协议细节在 [docs/hcaptcha-direct-solve.md](./docs/hcaptcha-direct-solve.md)。
+
+---
+
+欢迎加入群聊：https://t.me/c/TokenFlying/1
