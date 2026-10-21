@@ -11,6 +11,8 @@ from pathlib import Path
 
 import httpx
 
+from tax_free_billing import random_tax_free_billing
+
 sys.path.insert(0, "/opt/gss/app/packages/core/src")
 from gss_core.plus_protocol import PlusProtocol
 from gss_core.proxies import align_proxy_region, configured_proxy
@@ -69,15 +71,11 @@ def main() -> None:
     print("会话:", (re.search(r"oaics_[A-Za-z0-9]+", url) or [""])[0][:20] or "(无)")
     print("币种:", currency, " 金额:", d.get("amount"))
 
-    billing = {
-        "name": "FIXTURE HOLDER",
-        "email": d.get("session_email") or "billing@example.com",
-        "line1": "1 Fixture St",
-        "city": "Portland",
-        "state": "OR",
-        "postal_code": "97211",
-        "country": "US",
-    }
+    # 与前端一致：五个免税州随机生成地址
+    billing = random_tax_free_billing(
+        email=d.get("session_email") or "billing@example.com",
+        name="FIXTURE HOLDER",
+    )
 
     proxy = align_proxy_region(configured_proxy("checkout"), "US")
     if proxy:

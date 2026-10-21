@@ -10,12 +10,12 @@ from pathlib import Path
 
 import httpx
 
+from tax_free_billing import random_tax_free_billing
+
 API = "http://127.0.0.1:18120"
 ORIGIN = "https://<PAY_HOST>"
-BILLING = {
-    "name": "FIXTURE HOLDER", "email": "", "line1": "1 Fixture St",
-    "city": "Portland", "state": "OR", "postal_code": "97211", "country": "US",
-}
+# 账单地址与前端一致：五个免税州随机生成（见 tax_free_billing.py）
+CARDHOLDER = "FIXTURE HOLDER"
 
 
 def load_env(path: str) -> dict:
@@ -108,7 +108,10 @@ def run_cards(cards: list[dict], auth: dict, ats: list) -> None:
                     continue
                 oid = r.json()["id"]
                 d = c.get("/api/orders/" + oid, headers=ck).json()
-                billing = dict(BILLING, email=d.get("session_email") or "billing@example.com")
+                billing = random_tax_free_billing(
+                    email=d.get("session_email") or "billing@example.com",
+                    name=CARDHOLDER,
+                )
 
                 body = {"card": {k: card[k] for k in
                                  ("number", "exp_month", "exp_year", "cvc")},
