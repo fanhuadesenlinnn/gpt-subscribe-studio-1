@@ -70,3 +70,28 @@
     margin-inline: 4px;
   }
 }
+
+/* 提链后：配置 | 协议支付 | 摘要 三栏并列，避免往下滚动。
+   中间栏只在订单已生成、协议面板出现时存在。 */
+@media (min-width: 62em) {
+  .order-layout--split {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 300px;
+  }
+  .studio-container:has(.order-layout--split) {
+    max-width: 1560px;
+  }
+}
+/* 中等宽度放不下三栏时，中间那栏换到下一行左侧，摘要仍靠右 */
+@media (min-width: 62em) and (max-width: 87.5em) {
+  .order-layout--split {
+    grid-template-columns: minmax(0, 1fr) 300px;
+  }
+  .order-layout--split .order-payment {
+    grid-column: 1 / 2;
+    grid-row: 2;
+  }
+  .order-layout--split .order-side {
+    grid-column: 2 / 3;
+    grid-row: 1 / span 2;
+  }
+}

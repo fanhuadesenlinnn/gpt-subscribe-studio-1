@@ -90,8 +90,12 @@ function describe(result: ProtocolPayResult) {
       return {
         color: "yellow" as const,
         icon: <IconClock size={18} />,
-        title: "需要完成 3DS 验证",
-        hint: `PaymentIntent 状态 ${result.intent_status ?? "requires_action"}`,
+        title: "被 hCaptcha 人机验证拦截",
+        hint: [
+          "Stripe 在 confirm 阶段返回 intent_confirmation_challenge（hCaptcha，不是 3DS）",
+          "纯协议不做求解，本单已放弃、未扣款",
+          result.intent_status && `PaymentIntent 状态 ${result.intent_status}`,
+        ].filter(Boolean).join(" · "),
       };
     default:
       return {

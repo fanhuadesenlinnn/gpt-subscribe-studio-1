@@ -346,7 +346,7 @@ export function OrderNew({ onRecord }: Props) {
   ) : null;
   return (
     <form onSubmit={submit}>
-      <div className="order-layout">
+      <div className={`order-layout${step === 1 && order && payMode === "protocol" ? " order-layout--split" : ""}`}>
         <Paper className="order-main" withBorder p="lg" radius="md">
           <Stepper active={step} size="sm" mb="lg" allowNextStepsSelect={false}>
             <Stepper.Step label="配置订单" description="session、套餐、地区" />
@@ -468,54 +468,6 @@ export function OrderNew({ onRecord }: Props) {
             </Stack>
           )}
 
-          {step === 1 && order && payMode === "protocol" && (
-            <ProtocolPayPanel
-              orderId={order.id}
-              sessionEmail={order.session_email}
-              country={order.billing_country || country}
-              amount={order.amount}
-              currency={order.currency}
-              quotationError={order.quote_error}
-              exitLabel={protocolExit}
-              publishableKey={order.publishable_key}
-              checkoutUrl={order.checkout_url}
-              disabled={busy}
-              onRefreshQuote={async () => {
-                if (!order) return;
-                setBusy(true);
-                setError(null);
-                try {
-                  // 报价带账单地址才能算准税额；订单上已有就用它
-                  const known = order.billing;
-                  const complete = Boolean(
-                    known?.name && known?.line1 && known?.city && known?.postal_code && known?.country,
-                  );
-                  setOrder(await quoteTeam(order.id, complete ? (known as BillingInput) : undefined));
-                } catch (err) {
-                  setError(err instanceof Error ? err.message : "报价读取失败");
-                } finally {
-                  setBusy(false);
-                }
-              }}
-              onDone={(out) => {
-                // 协议层结果不是订单状态，拉一次订单让页面走到结果页/继续
-                void (async () => {
-                  const latest = await getOrder(order.id).catch(() => null);
-                  if (latest) setOrder(latest);
-                  if (out.state === "paid" || out.state === "card_declined") {
-                    finish({
-                      ...(latest ?? order),
-                      status: out.state === "paid" ? "active" : "failed",
-                      last_error:
-                        out.state === "card_declined"
-                          ? [out.code, out.decline_code, out.message].filter(Boolean).join(" / ")
-                          : null,
-                    });
-                  }
-                })();
-              }}
-            />
-          )}
 
 
           {step === 2 && result && <ResultPanel order={result} onReset={reset} />}
@@ -524,6 +476,56 @@ export function OrderNew({ onRecord }: Props) {
           {primaryAction}
         </Paper>
 
+        {step === 1 && order && payMode === "protocol" && (
+          <div className="order-payment">
+            <ProtocolPayPanel
+                orderId={order.id}
+                sessionEmail={order.session_email}
+                country={order.billing_country || country}
+                amount={order.amount}
+                currency={order.currency}
+                quotationError={order.quote_error}
+                exitLabel={protocolExit}
+                publishableKey={order.publishable_key}
+                checkoutUrl={order.checkout_url}
+                disabled={busy}
+                onRefreshQuote={async () => {
+                  if (!order) return;
+                  setBusy(true);
+                  setError(null);
+                  try {
+                    // 报价带账单地址才能算准税额；订单上已有就用它
+                    const known = order.billing;
+                    const complete = Boolean(
+                      known?.name && known?.line1 && known?.city && known?.postal_code && known?.country,
+                    );
+                    setOrder(await quoteTeam(order.id, complete ? (known as BillingInput) : undefined));
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : "报价读取失败");
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+                onDone={(out) => {
+                  // 协议层结果不是订单状态，拉一次订单让页面走到结果页/继续
+                  void (async () => {
+                    const latest = await getOrder(order.id).catch(() => null);
+                    if (latest) setOrder(latest);
+                    if (out.state === "paid" || out.state === "card_declined") {
+                      finish({
+                        ...(latest ?? order),
+                        status: out.state === "paid" ? "active" : "failed",
+                        last_error:
+                          out.state === "card_declined"
+                            ? [out.code, out.decline_code, out.message].filter(Boolean).join(" / ")
+                            : null,
+                      });
+                    }
+                  })();
+                }}
+            />
+          </div>
+        )}
 
         <div className="order-side">
           <OrderSummary plan={plan} country={country} order={order} seats={team.seats} />

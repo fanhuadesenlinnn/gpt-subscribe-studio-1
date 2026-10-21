@@ -47,7 +47,7 @@ export function ResultPanel({ order, onReset }: Props) {
         </Alert>
       )}
       {(order.next_action?.url || order.next_action?.checkout_url || (order.plan === "team" && order.checkout_url && !success && !failed)) && (
-        <Alert color="yellow" variant="light" title={order.next_action?.challenge_type === "intent_confirmation_challenge" ? "需要完成 Stripe 验证" : "支付验证与状态确认"}>
+        <Alert color="yellow" variant="light" title={order.next_action?.challenge_type === "intent_confirmation_challenge" ? "需要完成 hCaptcha 人机验证" : "支付验证与状态确认"}>
           <Anchor href={order.next_action?.url || order.next_action?.checkout_url || order.checkout_url || "#"} target="_blank" rel="noreferrer">
             {order.next_action?.url ? "打开支付验证页面" : "打开官方结账页完成验证"}
           </Anchor>
