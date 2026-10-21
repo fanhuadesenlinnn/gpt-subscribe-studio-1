@@ -162,6 +162,14 @@ class StripeProtocol:
         # 卡数据经过 Stripe iframe（真实用户路径），hCaptcha/Radar 判定更宽松。
         self.external_pm = ""
 
+        # 步骤开关。默认全关 = 与 scripts/run_cards.py 完全一致的精简链路：
+        #   init → payment_methods → confirm
+        # 打开后逐项加回「更像真人」的环节，会影响耗时与风控判定。
+        self.step_fingerprint = False   # m.stripe.com/6 × 4 + fetch_allowed_origins
+        self.step_dwell = False         # init 后停留 10–16s
+        self.step_elements = False      # elements/sessions
+        self.step_tax_region = False    # 提交 tax_region[country]
+
     def rotate_proxy_sid(self) -> str:
         """更换代理的 sid，得到新的出口 IP。
 
@@ -852,27 +860,37 @@ class StripeProtocol:
           +213s  payment_methods
           +213.7s confirm
         """
-        fp = self.register_fingerprint()
         abandoned = False
 
-        # 精简时间线（与成功案例一致）
-        self._sleep(random.uniform(2.0, 4.0))
-        self.fetch_allowed_origins()
+        if self.step_fingerprint:
+            fp = self.register_fingerprint()
+            self._sleep(random.uniform(2.0, 4.0))
+            self.fetch_allowed_origins()
+            self._sleep(random.uniform(1.0, 2.0))
+        else:
+            # 批量模式：不发 m.stripe.com/6，直接用随机 guid/muid/sid
+            fp = Fingerprint(guid=str(uuid.uuid4()), muid=str(uuid.uuid4()),
+                             sid=str(uuid.uuid4()))
+            log("① 跳过指纹注册（默认模式：随机 guid/muid/sid）")
 
-        self._sleep(random.uniform(1.0, 2.0))
         _, ctx = self.init_checkout(cs_id)
 
-        # init 后停留（成功案例是 13.5 秒）
-        dwell = random.uniform(10.0, 16.0)
-        log(f"   停留 {dwell:.1f}s（模拟用户阅读）")
-        time.sleep(dwell)
+        if self.step_dwell:
+            dwell = random.uniform(10.0, 16.0)
+            log(f"   停留 {dwell:.1f}s（模拟用户阅读）")
+            time.sleep(dwell)
 
-        locale, _tz = self._align_locale(self.proxy)
-        self.elements_session(cs_id, ctx, locale)
+        if self.step_elements:
+            locale, _tz = self._align_locale(self.proxy)
+            self.elements_session(cs_id, ctx, locale)
+        else:
+            log("③ 跳过 elements/sessions（默认模式）")
 
-        # 只提交一次 tax_region
-        self._sleep(random.uniform(0.5, 1.2))
-        self.update_address(cs_id, ctx)
+        if self.step_tax_region:
+            self._sleep(random.uniform(0.5, 1.2))
+            self.update_address(cs_id, ctx)
+        else:
+            log("④ 跳过 tax_region（默认模式）")
 
         # 纯协议：不生成 passive token，直接进入 confirm。
         # 实测不带 passive token 时 confirm 仍返回 200，且部分卡会直接 402 拒卡。

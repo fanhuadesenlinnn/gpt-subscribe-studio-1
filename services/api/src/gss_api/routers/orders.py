@@ -771,6 +771,15 @@ async def get_order(order_id: str) -> OrderOut:
     return _to_out(order)
 
 # ── 纯协议支付（不依赖浏览器） ────────────────────────────────
+class ProtocolStepsIn(BaseModel):
+    """协议链路的可选环节。全部默认关闭 = 与 scripts/run_cards.py 一致的批量模式。"""
+
+    fingerprint: bool = False   # m.stripe.com/6 × 4 指纹注册 + fetch_allowed_origins
+    dwell: bool = False         # init 后停留 10–16s
+    elements: bool = False      # elements/sessions
+    tax_region: bool = False    # 提交 tax_region[country]
+
+
 class ProtocolPayRequest(BaseModel):
     """协议支付的入参。
 
@@ -783,6 +792,7 @@ class ProtocolPayRequest(BaseModel):
     payment_method_id: Optional[str] = Field(default=None, max_length=80)
     billing: BillingIn
     proxy: Optional[str] = Field(default=None, max_length=300)
+    steps: ProtocolStepsIn = ProtocolStepsIn()
 
 
 def resolve_protocol_payment_method(payload: "ProtocolPayRequest") -> str:
@@ -851,6 +861,11 @@ async def pay_order_protocol(order_id: str, payload: ProtocolPayRequest) -> Prot
             proxy=proxy, captcha_key=captcha_key, captcha_url=captcha_url,
             card=card, billing=billing,
         )
+        # 默认全关（批量模式）；网页上勾选后逐项打开
+        sp.step_fingerprint = payload.steps.fingerprint
+        sp.step_dwell = payload.steps.dwell
+        sp.step_elements = payload.steps.elements
+        sp.step_tax_region = payload.steps.tax_region
         # 浏览器已经换好 pm_ 时复用它，服务端不再提交卡号
         sp.external_pm = pm_id
         try:

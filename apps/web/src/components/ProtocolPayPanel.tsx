@@ -12,6 +12,7 @@ import {
   Textarea,
   TextInput,
   Timeline,
+  Checkbox,
 } from "@mantine/core";
 import { IconAlertCircle, IconCheck, IconClock, IconX } from "@tabler/icons-react";
 import { useState } from "react";
@@ -127,6 +128,13 @@ export function ProtocolPayPanel({
     return randomBillingExample(base);
   });
   const [proxy, setProxy] = useState("");
+  // 协议链路的可选环节，全部默认关闭 = 与 scripts/run_cards.py 一致的批量模式
+  const [steps, setSteps] = useState({
+    fingerprint: false,
+    dwell: false,
+    elements: false,
+    tax_region: false,
+  });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ProtocolPayResult | null>(null);
@@ -164,6 +172,7 @@ export function ProtocolPayPanel({
         card: { number, cvc: card.cvc, exp_month: card.exp_month, exp_year: card.exp_year },
         billing: payloadBilling,
         proxy: proxy.trim() || undefined,
+        steps,
       });
       setResult(out);
       onDone?.(out);
@@ -286,6 +295,31 @@ export function ProtocolPayPanel({
             <TextInput label="州 / 省" value={billing.state} onChange={changeBilling("state")} disabled={busy} />
             <TextInput label="邮编" value={billing.postal_code} onChange={changeBilling("postal_code")} disabled={busy} />
           </SimpleGrid>
+        </Stack>
+      </Paper>
+
+      <Paper withBorder p="md" radius="md">
+        <Stack gap="xs">
+          <Group justify="space-between">
+            <Text fw={600} size="sm">额外环节（默认全关）</Text>
+            <Badge variant="light" size="sm">批量模式</Badge>
+          </Group>
+          <Text size="xs" c="dimmed">
+            默认链路与批量脚本一致：init → payment_methods → confirm。
+            勾选后逐项加回更像真人的环节，会拉长耗时。
+          </Text>
+          <Checkbox size="sm" checked={steps.fingerprint} disabled={busy}
+            onChange={(e) => setSteps({ ...steps, fingerprint: e.currentTarget.checked })}
+            label="指纹注册（m.stripe.com/6 × 4 + allowed_origins）" />
+          <Checkbox size="sm" checked={steps.dwell} disabled={busy}
+            onChange={(e) => setSteps({ ...steps, dwell: e.currentTarget.checked })}
+            label="init 后停留 10–16 秒（模拟阅读）" />
+          <Checkbox size="sm" checked={steps.elements} disabled={busy}
+            onChange={(e) => setSteps({ ...steps, elements: e.currentTarget.checked })}
+            label="elements/sessions（Stripe 元素初始化）" />
+          <Checkbox size="sm" checked={steps.tax_region} disabled={busy}
+            onChange={(e) => setSteps({ ...steps, tax_region: e.currentTarget.checked })}
+            label="提交 tax_region（按账单国家重算税额）" />
         </Stack>
       </Paper>
 

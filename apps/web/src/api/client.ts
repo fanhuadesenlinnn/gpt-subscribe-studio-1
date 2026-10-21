@@ -227,6 +227,13 @@ export interface ProtocolPayInput {
   payment_method_id?: string;
   billing: BillingInput;
   proxy?: string;
+  /** 协议链路的可选环节，全部默认关闭 = 批量脚本模式 */
+  steps?: {
+    fingerprint?: boolean;
+    dwell?: boolean;
+    elements?: boolean;
+    tax_region?: boolean;
+  };
 }
 
 /**
