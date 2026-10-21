@@ -1308,7 +1308,19 @@ class Session {
         }).filter(Boolean))
         .filter((v) => v.w >= 24 && v.h >= 24 && v.y < vh * 0.45)
         .filter((v) => /hcaptcha|newassets|blob:|data:image/.test(v.src));
-      return { prompt, header, imgs, bgImages: bgs, canvases, cells, headerImgs,
+      // 九宫格题可能把 9 个格子渲染成带 aria-label 的叠加层，这里全量列出
+      const ariaEls = [...document.querySelectorAll('[aria-label], [role], [class*="image"], [class*="task"]')]
+        .map((d) => {
+          const r = d.getBoundingClientRect();
+          return { tag: d.tagName.toLowerCase(),
+                   aria: (d.getAttribute('aria-label') || '').slice(0, 40),
+                   role: d.getAttribute('role') || '',
+                   cls: (d.className && String(d.className).slice(0, 40)) || '',
+                   x: Math.round(r.x), y: Math.round(r.y),
+                   w: Math.round(r.width), h: Math.round(r.height) };
+        })
+        .filter((e) => e.w >= 40 && e.h >= 40);
+      return { prompt, header, imgs, bgImages: bgs, canvases, cells, headerImgs, ariaEls,
                vw: window.innerWidth, vh, dpr: window.devicePixelRatio,
                frameUrl: location.href.slice(0, 160) };
     }).catch(() => null);
@@ -1392,6 +1404,116 @@ class Session {
       } catch (_) {}
     }
     return [];
+  }
+
+  /**
+   * 裁出挑战画布的「有效图像区」（去掉上方黑边与四周留白），返回 JPEG 与偏移。
+   * 文档要求点击类题目只提交大图区域，不要多也不要少。
+   */
+  async canvasContentCrop() {
+    const cands = this.page.frames().filter((f) => /challenge|newassets/.test(f.url()));
+    for (const f of cands) {
+      try {
+        const r = await f.evaluate(() => {
+          const all = [...document.querySelectorAll('canvas')]
+            .map((c) => ({ c, r: c.getBoundingClientRect() }))
+            .filter((o) => o.r.width > 120 && o.r.height > 120)
+            .sort((a, b) => (b.r.width * b.r.height) - (a.r.width * a.r.height));
+          if (!all.length) return null;
+          const c = all[0].c;
+          const W = c.width, H = c.height;
+          let data;
+          try { data = c.getContext('2d').getImageData(0, 0, W, H).data; } catch (e) { return null; }
+          const bright = (i) => (data[i] + data[i + 1] + data[i + 2]) / 3;
+          let minX = W, minY = H, maxX = -1, maxY = -1;
+          for (let y = 0; y < H; y += 2) {
+            for (let x = 0; x < W; x += 2) {
+              if (bright((y * W + x) * 4) > 26) {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+              }
+            }
+          }
+          if (maxX < 0) return null;
+          const w = maxX - minX + 1, h = maxY - minY + 1;
+          const t = document.createElement('canvas');
+          t.width = w; t.height = h;
+          window.__hcapSkip = true;
+          t.getContext('2d').drawImage(c, minX, minY, w, h, 0, 0, w, h);
+          window.__hcapSkip = false;
+          return { W, H, bbox: { minX, minY, w, h },
+                   jpg: t.toDataURL('image/jpeg', 0.92).split(',').pop() };
+        });
+        if (r && r.jpg) return r;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  /**
+   * 在可见挑战画布上按「饱和度」定位九宫格真实边界。
+   * 九宫格是彩色照片（饱和度高），格间缝隙与面板是白色（饱和度低），
+   * 上方黑边是黑色 —— 用饱和度判别比用底色差稳定得多。
+   */
+  async gridBoundsSaturation() {
+    const cands = this.page.frames().filter((f) => /challenge|newassets/.test(f.url()));
+    for (const f of cands) {
+      try {
+        const r = await f.evaluate(() => {
+          const all = [...document.querySelectorAll('canvas')]
+            .map((c) => ({ c, r: c.getBoundingClientRect() }))
+            .filter((o) => o.r.width > 120 && o.r.height > 120)
+            .sort((a, b) => (b.r.width * b.r.height) - (a.r.width * a.r.height));
+          if (!all.length) return null;
+          const c = all[0].c;
+          const W = c.width, H = c.height;
+          let data;
+          try { data = c.getContext('2d').getImageData(0, 0, W, H).data; } catch (e) { return null; }
+          const sat = (i) => {
+            const r0 = data[i], g0 = data[i + 1], b0 = data[i + 2];
+            const mx = Math.max(r0, g0, b0), mn = Math.min(r0, g0, b0);
+            return mx - mn;
+          };
+          // 逐行累计饱和像素数
+          const rowHits = new Array(H).fill(0);
+          const colHits = new Array(W).fill(0);
+          for (let y = 0; y < H; y += 2) {
+            for (let x = 0; x < W; x += 2) {
+              const i = (y * W + x) * 4;
+              if (sat(i) > 32) { rowHits[y]++; colHits[x]++; }
+            }
+          }
+          const pick = (hits, n) => {
+            const th = Math.max(...hits) * 0.22;
+            let lo = -1, hi = -1;
+            for (let i = 0; i < n; i++) { if (hits[i] > th) { if (lo < 0) lo = i; hi = i; } }
+            return lo < 0 ? null : [lo, hi];
+          };
+          const ry = pick(rowHits, H);
+          const rx = pick(colHits, W);
+          if (!ry || !rx) return null;
+          const minX = rx[0], maxX = rx[1], minY = ry[0], maxY = ry[1];
+          const bw = maxX - minX, bh = maxY - minY;
+          if (bw < 100 || bh < 100) return null;
+          const boxes = [];
+          for (let r0 = 0; r0 < 3; r0++) {
+            for (let c0 = 0; c0 < 3; c0++) {
+              boxes.push({
+                x: Math.round(minX + bw * c0 / 3),
+                y: Math.round(minY + bh * r0 / 3),
+                w: Math.round(bw / 3),
+                h: Math.round(bh / 3),
+              });
+            }
+          }
+          return { W, H, bbox: { minX, minY, maxX, maxY }, boxes };
+        });
+        if (r && r.boxes) return r;
+      } catch (_) {}
+    }
+    return null;
   }
 
   /**
@@ -1948,13 +2070,19 @@ const server = http.createServer(async (req, res) => {
 
   // 一次性完成：出题 -> 导出 canvas -> (可选)按坐标作答 -> 拿 token
   // { session_id, coords?: [[x,y],...], submit?: true, timeout_ms? }
-  // 九宫格全流程：切图 → HCaptchaClassification → 点击 → 提交 → 取 token。
+  // 全流程：按页循环 —— 判题 → 点击/拖拽 → 提交 → 取 token。
+  // hCaptcha 会出多页题（"page 1 of 2"），一页答完还有下一页，必须循环到 token 出现。
   if (req.method === 'POST' && url.pathname === '/answer') {
     const body = await readBody(req);
     const s = sessions.get((body && body.session_id) || '');
     if (!s) return send(404, { error: 'no_session' });
     const ck = CAPTCHA_KEY;
     if (!ck) return send(400, { error: 'no_captcha_key' });
+    const maxPages = Number(body.max_pages || 4);
+    const clean = (t) => String(t || '')
+      .replace(/Please select an image to report\.?/gi, '')
+      .replace(/Please try again\.?/gi, '')
+      .replace(/\s+/g, ' ').trim();
     try {
       s.busy = true;
       const out = await s.withLock(async () => {
@@ -1965,248 +2093,146 @@ const server = http.createServer(async (req, res) => {
           timeout: Number(body.timeout_ms || 45000),
         });
         if (solved.token) return { phase: 'solved_direct', token: solved.token,
-                                   tokenLen: solved.token.length };
-        const ch = solved.challenge || await s.captureChallenge().catch(() => null);
-        if (!ch) return { phase: 'error', error: 'no_capture' };
+                                   tokenLen: solved.token.length, pages: [] };
+        let ch = solved.challenge || await s.captureChallenge().catch(() => null);
+        const pages = [];
 
-        let question = String(ch.prompt || '');
-        question = question.replace(/Please select an image to report\.?/gi, '')
-                           .replace(/Please try again\.?/gi, '')
-                           .replace(/\s+/g, ' ').trim();
+        for (let page = 1; page <= maxPages; page++) {
+          if (!ch) break;
+          let question = clean(ch.prompt);
 
-        // anchors
-        const anchors = [];
-        for (const hi of (ch.headerImgs || [])) {
-          if (!/imgs\d*\.hcaptcha\.com/.test(hi.src || '')) continue;
+          // 拖拽题换题（0 成本）
+          let skips = 0;
+          while (/drag/i.test(question) && skips < 4) {
+            if (!(await s.skipChallenge())) break;
+            skips++;
+            await sleep(1800);
+            const nx = await s.captureChallenge().catch(() => null);
+            if (!nx) break;
+            ch = nx;
+            question = clean(nx.prompt);
+          }
+          if (/drag/i.test(question)) {
+            pages.push({ page, skippedDrag: true, question, skips });
+            break;
+          }
+
+          // 题图
+          const drawn = await s.drawnImages().catch(() => []);
+          const big = drawn.filter((d) => d.w >= 200 && d.dest)
+            .sort((x, y) => (y.w * y.h) - (x.w * x.h))[0] || null;
+          const isGridPrompt = /select|click each image|choose|pick all/i.test(question)
+            && !/lines?|shorter|longer|curve|shapes?/i.test(question);
+          let split = null;
+          if (isGridPrompt && big) {
+            try { split = await s.splitDrawnIntoTiles(0, 3, 3); } catch (e) {}
+          }
+          const useGrid = !!split && Array.isArray(split.tiles) && split.tiles.length === 9;
+          const cv0 = (ch.canvases || [])[0];
+          if (!cv0 || !cv0.jpg) { pages.push({ page, error: 'no_canvas' }); break; }
+          let crop = null;
+          if (!useGrid) { try { crop = await s.canvasContentCrop(); } catch (e) {} }
+
+          // anchors
+          const anchors = [];
+          for (const hi of (ch.headerImgs || [])) {
+            if (!/imgs\d*\.hcaptcha\.com/.test(hi.src || '')) continue;
+            try {
+              const r = await fetch(hi.src);
+              anchors.push(Buffer.from(await r.arrayBuffer()).toString('base64'));
+            } catch (e) {}
+          }
+
+          const task = {
+            type: 'HCaptchaClassification',
+            queries: useGrid ? split.tiles
+              : (crop && crop.jpg ? [crop.jpg] : [String(cv0.jpg).split(',').pop()]),
+          };
+          if (question) task.question = question;
+          if (anchors.length) task.anchors = anchors;
+
           try {
-            const r = await fetch(hi.src);
-            anchors.push(Buffer.from(await r.arrayBuffer()).toString('base64'));
+            require('fs').writeFileSync('/opt/gss/data/q_last_meta.json', JSON.stringify({
+              page, question, mode: useGrid ? 'grid' : 'click',
+              queries: task.queries.length, anchors: anchors.length }));
+            task.queries.forEach((q, i) => {
+              try {
+                require('fs').writeFileSync(`/opt/gss/data/q_last_${i}.jpg`,
+                  Buffer.from(q, 'base64'));
+              } catch (e) {}
+            });
+            anchors.forEach((a, i) => {
+              try {
+                require('fs').writeFileSync(`/opt/gss/data/a_last_${i}.jpg`,
+                  Buffer.from(a, 'base64'));
+              } catch (e) {}
+            });
           } catch (e) {}
-        }
 
-        let isDrag = /drag/i.test(question);
-        let skipTimes = 0;
-        let curPrompt = question;
-        let chCur = ch;
-        while (isDrag && skipTimes < 4) {
-          const ok = await s.skipChallenge();
-          skipTimes++;
-          if (!ok) break;
-          await sleep(1800);
-          const nx = await s.captureChallenge().catch(() => null);
-          if (!nx) break;
-          chCur = nx;
-          curPrompt = String(nx.prompt || '')
-            .replace(/Please select an image to report\.?/gi, '')
-            .replace(/Please try again\.?/gi, '').replace(/\s+/g, ' ').trim();
-          isDrag = /drag/i.test(curPrompt);
-        }
-        if (isDrag) {
-          return { phase: 'skipped_drag', question: curPrompt,
-                   skips: skipTimes, cost: 0 };
-        }
-        const question2 = curPrompt;
-        if (question2 && question2 !== question) {
-          // 换题后用新的题干与新的画布
-          question = question2;
-          ch = chCur;
-        }
-        const cv0 = (ch.canvases || [])[0];
-        if (!cv0 || !cv0.jpg) return { phase: 'error', error: 'no_canvas', question };
-        const oneQuery = [String(cv0.jpg).split(',').pop()];
-
-        // hCaptcha 把解密后的原图 drawImage 到挑战 canvas 上。网格题的原图是
-        // 一张严丝合缝的合成图（实测 480×320），按 3×3 均分即可，不需要切放大后的 canvas。
-        const drawn = await s.drawnImages().catch(() => []);
-        const big = drawn.filter((d) => d.w >= 200 && d.dest)
-          .sort((x, y) => (y.w * y.h) - (x.w * x.h))[0] || null;
-
-        const isGridPrompt = /select|click each image|choose|pick all/i.test(question)
-          && !/lines?|shorter|longer|curve/i.test(question);
-        let split = null;
-        if (!isDrag && isGridPrompt && big) {
-          try { split = await s.splitDrawnIntoTiles(0, 3, 3); } catch (e) {}
-        }
-        const useGrid = !!split && Array.isArray(split.tiles) && split.tiles.length === 9;
-        const task = {
-          type: 'HCaptchaClassification',
-          queries: useGrid ? split.tiles : oneQuery,
-        };
-        if (question) task.question = question;
-        if (anchors.length) task.anchors = anchors;
-
-        // 落盘实际发送的题图，供人工核对「服务商答错」还是「我们索引错位」
-        try {
-          const fs = require('fs');
-          const qs = Array.isArray(task.queries) ? task.queries : [];
-          qs.forEach((q, i) => {
-            try { fs.writeFileSync(`/opt/gss/data/q_last_${i}.jpg`, Buffer.from(q, 'base64')); } catch (e) {}
-          });
-          const as = Array.isArray(task.anchors) ? task.anchors : [];
-          as.forEach((a, i) => {
-            try { fs.writeFileSync(`/opt/gss/data/a_last_${i}.jpg`, Buffer.from(a, 'base64')); } catch (e) {}
-          });
-          fs.writeFileSync('/opt/gss/data/q_last_meta.json', JSON.stringify({
-            question, queries: qs.length, anchors: as.length,
-            gridImage: split ? { w: split.w, h: split.h } : null,
-            dest: big ? big.dest : null,
-            canvas: { w: cv0.w, h: cv0.h },
-          }));
-        } catch (e) {}
-
-        let sol = null;
-        try {
-          const cr = await fetch(`${CAPTCHA_URL}/createTask`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ clientKey: ck, task }),
-          });
-          const cj = await cr.json();
-          if (cj && cj.errorId) {
-            return { phase: 'error', error: cj.errorCode,
-                     desc: String(cj.errorDescription || '').slice(0, 140),
-                     question, mode: useGrid ? 'grid' : (isDrag ? 'drag' : 'click') };
-          }
-          sol = cj.solution || null;
-          try { require('fs').writeFileSync('/opt/gss/data/sol_last.json',
-            JSON.stringify(cj, null, 1)); } catch (e) {}
-        } catch (e) {
-          return { phase: 'error', error: 'classify_failed', desc: String(e).slice(0, 140), question };
-        }
-        if (!sol) return { phase: 'error', error: 'empty_solution', question };
-        const mode = useGrid ? 'grid' : (isDrag ? 'drag' : 'click');
-
-        // 拖拽题：文档要求 queries 里同时含「可拖小块」和「目标位置」，
-        // 所以发整个 iframe 截图，并直接按截图坐标系做拖拽。
-        if (mode === 'drag') {
-          let shotB64 = '';
+          let sol = null;
           try {
-            const el = await s.page.$('iframe[src*="frame=challenge"]');
-            const bx = el && await el.boundingBox();
-            if (bx) {
-              const png = await s.page.screenshot({
-                clip: { x: Math.max(0, bx.x), y: Math.max(0, bx.y),
-                        width: Math.min(bx.width, 2000), height: Math.min(bx.height, 2000) },
-              });
-              require('fs').writeFileSync('/opt/gss/data/last_drag_shot.png', png);
-              shotB64 = png.toString('base64');
-              const dTask = { type: 'HCaptchaClassification', queries: [shotB64] };
-              if (question) dTask.question = question;
-              const dr0 = await fetch(`${CAPTCHA_URL}/createTask`, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ clientKey: ck, task: dTask }),
-              });
-              const dj = await dr0.json();
-              if (dj && dj.errorId) {
-                return { phase: 'error', error: dj.errorCode, question, mode };
-              }
-              sol = dj.solution || null;
-              const dbox = sol && sol.box;
-              let st2 = null, en2 = null;
-              if (Array.isArray(dbox) && dbox.length && typeof dbox[0] === 'object') {
-                st2 = dbox[0].start; en2 = dbox[0].end;
-              } else if (Array.isArray(dbox) && dbox.length >= 4) {
-                st2 = [Number(dbox[0]), Number(dbox[1])];
-                en2 = [Number(dbox[2]), Number(dbox[3])];
-              }
-              if (!st2 || !en2) return { phase: 'error', error: 'drag_no_coords',
-                                         question, solution: sol };
-              // 截图坐标即 iframe 内坐标，加上 iframe 原点就是页面坐标
-              const ax0 = bx.x + Number(st2[0]), ay0 = bx.y + Number(st2[1]);
-              const ax1 = bx.x + Number(en2[0]), ay1 = bx.y + Number(en2[1]);
-              await s.page.mouse.move(ax0, ay0);
-              await sleep(150);
-              await s.page.mouse.down();
-              await sleep(140);
-              for (let i = 1; i <= 16; i++) {
-                const t = i / 16;
-                await s.page.mouse.move(ax0 + (ax1 - ax0) * t, ay0 + (ay1 - ay0) * t);
-                await sleep(22 + Math.random() * 22);
-              }
-              await sleep(200);
-              await s.page.mouse.up();
-              await sleep(900);
-              let tok2 = '';
-              try { tok2 = await s.waitToken(14000); } catch (e) {}
-              const again = await s.captureChallenge().catch(() => null);
-              const sub2 = tok2 ? null : await s.submitChallenge().catch(() => null);
-              if (!tok2) { try { tok2 = await s.readPendingToken(); } catch (e) {} }
-              return { phase: tok2 ? 'answered' : 'answer_not_accepted', mode,
-                       question, dragStart: st2, dragEnd: en2,
-                       page: [[Math.round(ax0), Math.round(ay0)], [Math.round(ax1), Math.round(ay1)]],
-                       after: (again && again.prompt) || '',
-                       submit: sub2, token: tok2, tokenLen: tok2 ? tok2.length : 0,
-                       solution: sol };
+            const cr = await fetch(`${CAPTCHA_URL}/createTask`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ clientKey: ck, task }),
+            });
+            const cj = await cr.json();
+            if (cj && cj.errorId) {
+              pages.push({ page, error: cj.errorCode, question });
+              break;
             }
+            sol = cj.solution || null;
+            try { require('fs').writeFileSync('/opt/gss/data/sol_last.json',
+              JSON.stringify(cj, null, 1)); } catch (e) {}
           } catch (e) {
-            return { phase: 'error', error: 'drag_failed', desc: String(e).slice(0, 140) };
+            pages.push({ page, error: 'classify_failed', desc: String(e).slice(0, 120) });
+            break;
           }
-        }
+          if (!sol) { pages.push({ page, error: 'empty_solution', question }); break; }
 
-        // 旧拖拽分支（canvas 坐标系，留作兜底）
-        if (mode === 'drag' && false) {
-          const bx = sol.box;
-          let st = null, en = null;
-          if (Array.isArray(bx) && bx.length && typeof bx[0] === 'object') {
-            st = bx[0].start; en = bx[0].end;
-          } else if (Array.isArray(bx) && bx.length >= 4) {
-            st = [Number(bx[0]), Number(bx[1])]; en = [Number(bx[2]), Number(bx[3])];
+          // 命中与坐标
+          let picked = [];
+          let coords = [];
+          if (useGrid) {
+            if (Array.isArray(sol.objects)) sol.objects.forEach((v, i) => { if (v) picked.push(i); });
+            else if (Array.isArray(sol.top_k)) picked = sol.top_k.map(Number).filter((n) => n >= 0 && n < 9);
+            const gb = await s.gridBoundsSaturation().catch(() => null);
+            coords = picked.map((i) => {
+              if (gb && gb.boxes[i]) {
+                const b = gb.boxes[i];
+                return [(b.x + b.w / 2) / gb.W, (b.y + b.h / 2) / gb.H];
+              }
+              return [0.5, 0.5];
+            });
+          } else {
+            const bx = Array.isArray(sol.box) ? sol.box.map(Number) : [];
+            const ox = crop ? crop.bbox.minX : 0;
+            const oy = crop ? crop.bbox.minY : 0;
+            for (let i = 0; i + 1 < bx.length; i += 2) {
+              coords.push([(ox + bx[i]) / cv0.w, (oy + bx[i + 1]) / cv0.h]);
+            }
+            picked = coords.map((_, i) => i);
           }
-          if (!st || !en) return { phase: 'error', error: 'drag_no_coords', question, solution: sol };
-          const dr = await s.dragOnCanvas([st[0] / cv0.w, st[1] / cv0.h],
-                                          [en[0] / cv0.w, en[1] / cv0.h]);
-          let token = '';
-          try { token = await s.waitToken(18000); } catch (e) {}
-          return { phase: token ? 'answered' : 'answer_not_accepted', mode, question,
-                   drag: { start: st, end: en }, action: dr, token,
-                   tokenLen: token ? token.length : 0 };
-        }
+          if (!coords.length) {
+            pages.push({ page, mode: useGrid ? 'grid' : 'click', question,
+                         empty: true, solution: sol });
+            break;
+          }
 
-        // 点击类：解析命中格子/坐标
-        let coords = [];
-        let picked = [];
-        if (useGrid) {
-          if (Array.isArray(sol.objects)) {
-            sol.objects.forEach((v, i) => { if (v) picked.push(i); });
-          } else if (Array.isArray(sol.top_k)) {
-            picked = sol.top_k.map(Number).filter((n) => n >= 0 && n < 9);
+          const ans = await s.answerChallengeAt(coords);
+          const sub = await s.submitChallenge();
+          const token = await s.waitToken(16000);
+          pages.push({ page, mode: useGrid ? 'grid' : 'click', question,
+                       picked, coords, answer: ans, submit: sub,
+                       gotToken: !!token });
+          if (token) {
+            return { phase: 'answered', token, tokenLen: token.length,
+                     mode: useGrid ? 'grid' : 'click', pages };
           }
-          // 合成图的落点矩形 + 3×3 均分 → 每格中心（canvas 像素）→ 归一化
-          const d = big.dest;
-          coords = picked.map((i) => {
-            const r0 = Math.floor(i / 3), c0 = i % 3;
-            return [(d.x + d.w * (c0 + 0.5) / 3) / cv0.w,
-                    (d.y + d.h * (r0 + 0.5) / 3) / cv0.h];
-          });
-        } else {
-          const bx = Array.isArray(sol.box) ? sol.box.map(Number) : [];
-          for (let i = 0; i + 1 < bx.length; i += 2) {
-            coords.push([bx[i] / cv0.w, bx[i + 1] / cv0.h]);
-          }
-          picked = coords.map((_, i) => i);
+          await sleep(1500);
+          ch = await s.captureChallenge().catch(() => null);
         }
-        if (!coords.length) return { phase: 'empty', mode, question, solution: sol };
-
-        const ans = await s.answerChallengeAt(coords);
-        const sub = await s.submitChallenge();
-        let token = '';
-        try { token = await s.waitToken(18000); } catch (e) {}
-        return {
-          phase: token ? 'answered' : 'answer_not_accepted',
-          mode,
-          question,
-          picked,
-          coords: coords.map((c) => [Math.round(c[0] * 1000) / 1000,
-                                     Math.round(c[1] * 1000) / 1000]),
-          bbox: null,
-          source: useGrid ? 'drawn-split' : 'canvas',
-          gridImage: split ? { w: split.w, h: split.h } : null,
-          solution: sol,
-          answer: ans,
-          submit: sub,
-          token,
-          tokenLen: token ? token.length : 0,
-        };
+        return { phase: 'answer_not_accepted', pages,
+                 question: pages.length ? pages[pages.length - 1].question : '' };
       });
       return send(200, out);
     } catch (e) {
@@ -2339,6 +2365,7 @@ const server = http.createServer(async (req, res) => {
             }
           }
         } catch (e) {}
+        const gbMeta = await s.gridBoundsSaturation().catch(() => null);
         let drawnMeta = [];
         try {
           const dr = await s.drawnImages();
@@ -2365,13 +2392,14 @@ const server = http.createServer(async (req, res) => {
         const slim = ch ? {
           prompt: ch.prompt, header: ch.header,
           vw: ch.vw, vh: ch.vh, dpr: ch.dpr,
-          cells: ch.cells, headerImgs: ch.headerImgs, imgsN: (ch.imgs || []).length,
+          cells: ch.cells, headerImgs: ch.headerImgs, ariaEls: ch.ariaEls,
+          imgsN: (ch.imgs || []).length,
           bgN: (ch.bgImages || []).length,
           canvases: (ch.canvases || []).map((c) => ({ i: c.i, w: c.w, h: c.h,
             len: c.dataUrl ? c.dataUrl.length : 0, err: c.err })),
           frameUrl: ch.frameUrl,
         } : null;
-        return { phase: 'challenge', capture: slim, drawn: drawnMeta,
+        return { phase: 'challenge', capture: slim, grid: gbMeta, drawn: drawnMeta,
                  shotLen: shot ? shot.length : 0, shot };
       });
       return send(200, out);
