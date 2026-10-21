@@ -157,13 +157,11 @@ class StripeProtocol:
         self.order_factory = None  # 可选：返回新 checkout_url 的 callable
         self._captcha_client: httpx.Client | None = None
         # solver 会话：passive 与 challenge 必须同一浏览器 + 同一出口 IP
-        self._solver_session = ""
         self._solver_ua = ""
         self._email_cache = ""
         # 由浏览器 Stripe 输入框产出的 pm_：给定时跳过服务端 tokenize。
         # 卡数据经过 Stripe iframe（真实用户路径），hCaptcha/Radar 判定更宽松。
         self.external_pm = ""
-        self._solver_url = os.environ.get("HCAPTCHA_SOLVER_URL", "").rstrip("/")
 
     def rotate_proxy_sid(self) -> str:
         """更换代理的 sid，得到新的出口 IP。
@@ -203,14 +201,6 @@ class StripeProtocol:
                 )
                 log("   使用 httpx（默认 TLS 指纹）")
         return self._client
-
-    def _captcha_http(self) -> httpx.Client:
-        # 打码服务直连，不经过订单代理
-        if self._captcha_client is None:
-            self._captcha_client = httpx.Client(
-                timeout=60, headers={"User-Agent": UA, "Content-Type": "application/json"}
-            )
-        return self._captcha_client
 
     def close(self) -> None:
         for c in (self._client, self._captcha_client):
@@ -573,191 +563,11 @@ class StripeProtocol:
             log(f"   {r.text[:100]}")
 
 
-    def _solver_open_session(self, timeout: int = 180) -> str:
-        """开一个 solver 浏览器会话，供 passive 与 challenge 共用。
+    # 纯协议模式：不出浏览器、不调打码。
+    # 遇到 intent_confirmation_challenge 直接判定为 challenge_required，
+    # 由上层决定丢弃还是重跑。
+    # （浏览器/打码求解器代码已移入 attic/browser-route-20261021/）
 
-        为什么要共用：Stripe 的 verify_challenge 校验 token 与发起支付的环境
-        同源（同一出口 IP、同一浏览器指纹）。passive 与 challenge 各开一个
-        会话就等于两个不同出口，challenge 必被拒
-        （payment_intent_authentication_failure）。
-        """
-        if self._solver_session or not self._solver_url:
-            return self._solver_session
-        try:
-            r = httpx.post(
-                f"{self._solver_url}/session",
-                json={"proxy": self.proxy or "", "ua": UA},
-                timeout=timeout,
-            )
-            if r.status_code == 200:
-                j = r.json()
-                self._solver_session = str(j.get("session_id") or "")
-                self._solver_ua = str(j.get("ua") or "")
-                log(f"   solver 会话 {self._solver_session[:8]} "
-                    f"proxy={'有' if self.proxy else '无'}")
-                return self._solver_session
-            log(f"   solver 开会话 HTTP {r.status_code}: {r.text[:100]}")
-        except Exception as e:
-            log(f"   solver 开会话失败: {str(e)[:80]}")
-        return ""
-
-    def _solver_close_session(self) -> None:
-        if not self._solver_session or not self._solver_url:
-            return
-        sid = self._solver_session
-        self._solver_session = ""
-        try:
-            httpx.delete(f"{self._solver_url}/session/{sid}", timeout=30)
-        except Exception:
-            pass
-
-    def _solve_via_browser(self, site_key: str, rqdata: str,
-                           timeout: int = 180) -> dict[str, str] | None:
-        """通过 hCaptcha solver 服务产出真实 token。
-
-        两种接入方式，按优先级：
-          ① HTTP 服务（推荐）：POST {solver_url}/solve（带会话）
-          ② 共享卷（兜底）：写 cfg 文件 → 轮询读 token 文件
-
-        为什么需要浏览器：所有 stripe 域的 CSP 都缺 'unsafe-eval'，
-        hCaptcha 的 wasm 只能在 newassets.hcaptcha.com 的 iframe 内运行。
-        详见 tools/hcaptcha-solver/README.md
-        """
-        if not site_key:
-            return None
-
-        solver_url = os.environ.get("HCAPTCHA_SOLVER_URL", "").rstrip("/")
-        if solver_url:
-            return self._solve_via_http(solver_url, site_key, rqdata, timeout)
-        return self._solve_via_volume(site_key, rqdata, timeout)
-
-    def _solve_via_http(self, solver_url: str, site_key: str, rqdata: str,
-                        timeout: int) -> dict[str, str] | None:
-        """调用 solver 的 HTTP 接口（复用会话）。"""
-        payload: dict[str, Any] = {
-            "sitekey": site_key, "rqdata": rqdata, "host": "b.stripecdn.com",
-        }
-        if self._solver_session:
-            payload["session_id"] = self._solver_session
-        elif self.proxy:
-            payload["proxy"] = self.proxy
-            payload["ua"] = UA
-        try:
-            r = httpx.post(f"{solver_url}/solve", json=payload, timeout=timeout + 30)
-            if r.status_code == 200:
-                j = r.json()
-                tok = j.get("token") or ""
-                if tok.startswith("P1_") and len(tok) > 200:
-                    if not self._solver_session and j.get("session_id"):
-                        self._solver_session = str(j["session_id"])
-                    log(f"   solver token {len(tok)} chars ekey={len(j.get('ekey') or '')} "
-                        f"({j.get('elapsed_ms', '?')}ms)")
-                    return {"token": tok, "ekey": str(j.get("ekey") or "")}
-                log(f"   solver 返回异常: {str(j.get('error'))[:80]}")
-            else:
-                log(f"   solver HTTP {r.status_code}: {r.text[:100]}")
-        except Exception as e:
-            log(f"   solver 连接失败: {str(e)[:80]}")
-        return None
-
-    def _solve_via_volume(self, site_key: str, rqdata: str,
-                          timeout: int) -> dict[str, str] | None:
-        """兜底：通过共享卷与宿主机 watcher 协作。"""
-        data_dir = Path(os.environ.get("HCAP_DATA", "/data"))
-        cfg_path = data_dir / "hcap_cfg.json"
-        tok_path = data_dir / "hcap_token.txt"
-        try:
-            if tok_path.exists():
-                tok_path.unlink()
-        except Exception:
-            pass
-        try:
-            cfg_path.write_text(json.dumps({"site_key": site_key, "rqdata": rqdata}))
-        except Exception as e:
-            log(f"   写 cfg 失败: {str(e)[:60]}")
-            return None
-
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            time.sleep(2)
-            if tok_path.exists():
-                try:
-                    t = tok_path.read_text().strip()
-                except Exception:
-                    continue
-                if t.startswith("P1_") and len(t) > 200:
-                    log(f"   卷 token {len(t)} chars")
-                    return {"token": t, "ekey": ""}
-        log("   卷 token 超时")
-        return None
-
-    # ── ⑤/⑦b hCaptcha ──────────────────────────────────────
-    def _solve_captcha(
-        self, site_key: str, rqdata: str, use_proxy: bool = False
-    ) -> dict[str, str] | None:
-        if not self.captcha_key or not site_key:
-            return None
-        website = (
-            "https://b.stripecdn.com/stripethirdparty-srv/assets/v35.5/HCaptchaInvisible.html"
-        )
-        # 字段名以 https://docs.yescaptcha.com/openapi.json 为准：
-        #   · hCaptcha 只接受顶层 rqdata；enterprisePayload 是 reCAPTCHA 的字段
-        #   · isEnterprise 在 schema 里不存在，传了也会被忽略
-        task: dict[str, Any] = {
-            "websiteURL": website,
-            "websiteKey": site_key,
-            "userAgent": UA,
-        }
-        if use_proxy and self.proxy:
-            u = httpx.URL(self.proxy)
-            task.update({
-                "type": "HCaptchaTask",
-                "proxyType": u.scheme or "http",
-                "proxyAddress": u.host,
-                "proxyPort": u.port or 8080,
-                "proxyLogin": u.username or "",
-                "proxyPassword": u.password or "",
-            })
-        else:
-            task["type"] = "HCaptchaTaskProxyless"
-        if rqdata:
-            task["rqdata"] = rqdata
-
-        cc = self._captcha_http()
-        try:
-            r = cc.post(f"{self.captcha_url}/createTask",
-                        json={"clientKey": self.captcha_key, "task": task})
-            j = r.json()
-            if j.get("errorId"):
-                log(f"   createTask 失败: {j.get('errorCode')}")
-                return None
-            task_id = j.get("taskId")
-            if not task_id:
-                return None
-        except Exception as e:
-            log(f"   createTask 异常: {str(e)[:80]}")
-            return None
-
-        for _ in range(60):
-            time.sleep(3)
-            try:
-                r = cc.post(f"{self.captcha_url}/getTaskResult",
-                            json={"clientKey": self.captcha_key, "taskId": task_id})
-                j = r.json()
-            except Exception:
-                continue
-            if j.get("status") == "ready":
-                sol = j.get("solution") or {}
-                tok = sol.get("gRecaptchaResponse") or sol.get("token") or ""
-                ekey = sol.get("eKey") or sol.get("respKey") or ""
-                return {"token": tok, "ekey": ekey}
-            code = j.get("errorCode")
-            if code and code != "ERROR_TASK_NOT_READY":
-                log(f"   任务错误: {code}")
-                return None
-        return None
-
-    # ── ⑥ payment_methods ──────────────────────────────────
     def create_payment_method(
         self, cs_id: str, fp: Fingerprint, ctx: CheckoutContext
     ) -> str:
@@ -1037,11 +847,6 @@ class StripeProtocol:
         """
         fp = self.register_fingerprint()
 
-        # solver 会话必须在任何 hCaptcha 请求之前建立：
-        # passive 与 challenge 的 token 要同浏览器、同出口 IP，
-        # 否则 verify_challenge 返回 payment_intent_authentication_failure。
-        self._solver_open_session()
-
         # 精简时间线（与成功案例一致）
         self._sleep(random.uniform(2.0, 4.0))
         self.fetch_allowed_origins()
@@ -1061,15 +866,10 @@ class StripeProtocol:
         self._sleep(random.uniform(0.5, 1.2))
         self.update_address(cs_id, ctx)
 
-        # 解 passive captcha
-        log("⑤ 解 passive captcha")
-        passive = self._solve_via_browser(ctx.site_key, ctx.rqdata)
-        if not passive:
-            passive = self._solve_captcha(ctx.site_key, ctx.rqdata, use_proxy=False)
-        if passive:
-            log(f"   passive {len(passive['token'])} chars")
-        else:
-            log("   passive 未解出，继续")
+        # 纯协议：不生成 passive token，直接进入 confirm。
+        # 实测不带 passive token 时 confirm 仍返回 200，且部分卡会直接 402 拒卡。
+        passive = None
+        log("⑤ 跳过 passive captcha（纯协议）")
 
         if self.external_pm:
             # 浏览器已用 Stripe 输入框换好 pm_，服务端不再提交卡号
@@ -1089,17 +889,10 @@ class StripeProtocol:
                 break
             sj = sdk.get("stripe_js") or {}
             pi = body.get("payment_intent") or {}
-            log(f"⑦b 解 challenge（第 {round_no + 1} 次）site_key={str(sj.get('site_key'))[:8]}")
-            ch = self._solve_via_browser(
-                str(sj.get("site_key") or ""), str(sj.get("rqdata") or "")
-            )
-            if not ch:
-                ch = self._solve_captcha(
-                    str(sj.get("site_key") or ""), str(sj.get("rqdata") or ""),
-                    use_proxy=True,
-                )
+            log(f"⑦b 命中 challenge（第 {round_no + 1} 次）site_key={str(sj.get('site_key'))[:8]}")
+            log("   纯协议模式：不出浏览器、不调打码，直接放弃本单")
+            ch = None
             if not (ch and sj.get("verification_url")):
-                log("   challenge 未解出")
                 break
             v = self.verify_challenge(
                 str(sj["verification_url"]), ch["token"],

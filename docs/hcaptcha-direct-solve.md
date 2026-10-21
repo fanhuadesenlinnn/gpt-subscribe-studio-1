@@ -1,5 +1,10 @@
 # 全协议 hCaptcha 直接求解（已跑通）
 
+> **路线已终止（2026-10-21）**：浏览器与打码求解器代码已移入
+> `attic/browser-route-20261021/`，项目回到纯协议模式。
+> 完整探索过程与逐轮实测数据见 [exploration-log-browser-route.md](./exploration-log-browser-route.md)。
+> 本文保留作为技术档案。
+
 > 时间：2026-10-20
 > 结论：**直接求解可行，无需图像题、无需人工点击，单次 300–370ms**
 
