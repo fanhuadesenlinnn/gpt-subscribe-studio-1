@@ -2683,3 +2683,88 @@ POST /createTask
 ### 29.5 点击失败可以退点
 
 点击后验证失败的，1 小时内用 `report` 上报，约 24 小时后结算返点。
+
+## 三十、UA 统一与「挑战不可规避」的确认（2026-10-21 第 26 轮）
+
+### 30.1 链路里存在四个不同 UA
+
+统一前：
+
+```
+stripe_protocol.UA       Chrome/146.0.0.0
+captcha.DEFAULT_UA       Chrome/136.0.0.0
+Node solver 浏览器        Chrome/155.0.0.0
+YesCaptcha 官方 UA        Chrome/155.0.0.0
+```
+
+而且 solver 浏览器自身也矛盾：
+
+```
+UA                      Windows NT 10.0 ... Chrome/155
+navigator.platform      Linux x86_64
+userAgentData.platform  Linux
+platformVersion         6.8.0
+```
+
+真实的 Linux Chrome 上报的是 `X11; Linux x86_64`，不是 `Windows NT 10.0`。
+这是最典型的交叉验证破绽。
+
+### 30.2 统一为 Linux Chrome 155
+
+三处全部改为：
+
+```
+Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36
+```
+
+改后浏览器自检：
+
+```json
+{"ua":"Mozilla/5.0 (X11; Linux x86_64) ... Chrome/155.0.0.0 Safari/537.36",
+ "platform":"Linux x86_64","uad":"Linux","cores":8,"webdriver":false,"dpr":1}
+```
+
+### 30.3 效果：passive 从 27s 降到 5.8s
+
+```
+统一前  ⑤ passive  3868 chars / 27113ms
+统一后  ⑤ passive  3836 chars /  5804ms
+```
+
+**提升 4.7 倍**，证明 UA 自洽确实影响 hCaptcha 评分。
+
+### 30.4 但挑战依旧 100% 出现
+
+```
+⑦ confirm      → 200
+⑦b challenge   → c7faac4c（第 1 次）
+⑧ poll ×15     → requires_action
+判定: challenge_required
+```
+
+含 `m.stripe.com/6` × 4 次完整指纹注册、UA 全链路自洽，
+`intent_confirmation_challenge` 仍然每次都下发。
+
+### 30.5 其他产品线是另一套协议
+
+```
+team  → https://pay.openai.com/c/pay/cs_live_...
+plus  → https://chatgpt.com/checkout/openai_llc/oaics_...
+```
+
+`plus` 走 ChatGPT 自定义结账，不是 Stripe hosted 流，`pay_from_url` 直接报
+`URL 里没有 cs_live_`。要验证「换产品线能否规避挑战」需要另写一套自定义结账协议。
+
+### 30.6 结论：三条约束互相排斥
+
+| 路线 | 是否需要浏览器 | 能否通过挑战 | 单次成本 |
+|---|---|---|---|
+| `HCaptchaTask` 代拿 token | 不需要 | **不能**（4 次实测） | 15–30 点 |
+| `HCaptchaClassification` 代答题 | 需要（在我们会话内） | 能 | 8 点 |
+| 自建视觉模型 | 需要 | 能，但准确率不足 | 0 |
+
+`intent_confirmation_challenge` 的 token 必须在 Stripe 自己发起的 hCaptcha
+会话里签发；第三方代解拿到的 token 一律被判 `Captcha challenge failed`。
+而 Stripe 的挑战在本流程下每次都下发，无法靠降低评分规避。
+
+因此「全协议（无浏览器） + 打码代拿 token」这个组合在该挑战上不成立。

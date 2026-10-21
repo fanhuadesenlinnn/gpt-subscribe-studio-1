@@ -43,10 +43,11 @@ V_FULL = "2025-03-31.basil; checkout_server_update_beta=v1; checkout_manual_appr
 V_BASE = "2025-03-31.basil"
 V_HOSTED = "2020-08-27;custom_checkout_beta=v1"
 V_ELEMENTS = "2026-03-25.dahlia"
+#: 必须与 solver 浏览器、captcha.py 完全一致，否则 confirm 的 UA 与前一步
+#: 签发 passive token 的 UA 不同，构成跨步骤的指纹矛盾。
 UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/146.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"
 )
 RUNTIME_HASH = "5412f474d5"
 PUBLISHABLE_KEY = os.environ.get(

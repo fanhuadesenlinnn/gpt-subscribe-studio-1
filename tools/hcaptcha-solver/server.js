@@ -56,9 +56,11 @@ const DEFAULT_HOST = process.env.HCAPTCHA_HOST || 'b.stripecdn.com';
 const TOKEN_TIMEOUT_MS = Number(process.env.TOKEN_TIMEOUT_MS || 90000);
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 600000);
 const MAX_SESSIONS = Number(process.env.MAX_SESSIONS || 8);
+// 必须与 navigator.platform / userAgentData.platform 自洽。
+// 之前这里是 Windows UA 配 Linux platform，是最典型的交叉验证破绽。
 const DEFAULT_UA =
   process.env.HCAPTCHA_UA ||
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36';
 
 // 页面自己加载 hcaptcha.com/1/api.js，并暴露一个 __reaSolve 供 CDP 调用。
@@ -700,8 +702,8 @@ class Session {
     });
 
     // 反自动化痕迹：webdriver 与插件数组
-    // 环境一致性伪装。实测服务器 Chrome 有三处自相矛盾：
-    //   UA 说 Windows / platform 是 Linux x86_64
+    // 环境一致性伪装。实测服务器 Chrome 有三处自相矛盾（现已修正 UA）：
+    //   UA 与 platform 必须同为 Linux
     //   GPU 是 SwiftShader 软件渲染
     //   navigator.userAgentData.brands 为空数组
     // hCaptcha 的 identity 校验会看这些。全部对齐到「Windows 10 + 真实 NVIDIA GPU」。
@@ -2065,11 +2067,16 @@ const server = http.createServer(async (req, res) => {
     const s = sessions.get(body.session_id || '');
     if (!s) return send(404, { error: 'no_session' });
     const coords = Array.isArray(body.coords) ? body.coords : [];
-    if (!coords.length) return send(400, { error: 'need coords' });
+    const indices = Array.isArray(body.indices) ? body.indices : [];
+    if (!coords.length && !indices.length) {
+      return send(400, { error: 'need coords or indices' });
+    }
     try {
       s.busy = true;
       const out = await s.withLock(async () => {
-        const ans = await s.answerChallengeAt(coords);
+        const ans = indices.length
+          ? await s.answerChallenge(indices)
+          : await s.answerChallengeAt(coords);
         let sub = null;
         if (body.submit !== false) {
           await sleep(400 + Math.random() * 400);
