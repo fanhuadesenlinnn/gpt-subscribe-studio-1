@@ -1,4 +1,4 @@
-import { Alert, Anchor, Button, Group, Paper, SegmentedControl, Select, Stack, Stepper, Text } from "@mantine/core";
+import { Alert, Button, Group, Paper, Select, Stack, Stepper, Text } from "@mantine/core";
 import { IconAlertCircle, IconCheck } from "@tabler/icons-react";
 import { useEffect, useRef, useState } from "react";
 
@@ -19,16 +19,13 @@ import {
 } from "../api/client";
 import { SUCCESS_STATUSES, isSettled } from "../api/history";
 import { subscribeOrderUpdates, type OrderUpdateEvent } from "../api/events";
-import { BillingForm } from "../components/BillingForm";
+import { loadStripe, type StripeCardHandle } from "../card-payment/CardFields";
 import { OrderSummary } from "../components/OrderSummary";
 import { PlanPicker, type TeamValues } from "../components/PlanPicker";
 import { ResultPanel } from "../components/ResultPanel";
 import { SessionField } from "../components/SessionField";
-import { StripeCardFields, loadStripe, type StripeCardHandle } from "../card-payment/CardFields";
-import { TeamPaymentPanel } from "../components/TeamPaymentPanel";
 import { ProtocolPayPanel } from "../components/ProtocolPayPanel";
 import { CheckoutLinkCard } from "../components/CheckoutLinkCard";
-import { randomBillingExample } from "../card-payment/billingExamples";
 import { emptyTeamCard, type TeamCardDraft } from "../card-payment/TeamCardForm";
 
 interface Props {
@@ -53,15 +50,14 @@ export function OrderNew({ onRecord }: Props) {
   const [teamBilling, setTeamBilling] = useState<BillingInput>({
     name: "", line1: "", city: "", state: "", postal_code: "", country: "US",
   });
-  const [teamExample, setTeamExample] = useState<BillingInput | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [promo, setPromo] = useState<PromoEligibility | null>(null);
   const [promoCampaignId, setPromoCampaignId] = useState("");
   const [promoBusy, setPromoBusy] = useState(false);
   const [promoError, setPromoError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // 支付路径：protocol = 全协议（服务端直接打 Stripe），browser = 浏览器 Stripe.js / 托管长链
-  const [payMode, setPayMode] = useState<"browser" | "protocol">("browser");
+  // 支付路径固定为「全协议」：服务端直接打 Stripe，不再提供浏览器/托管长链分支
+  const payMode = "protocol" as const;
   const hosted = order ? isHostedOrder(order) : plan === "team";
   const teamOrder = (order?.plan ?? plan) === "team";
   // Team 托管结账只要拿到 Stripe 公钥，就能和 Plus 一样站内填卡支付；
@@ -79,7 +75,6 @@ export function OrderNew({ onRecord }: Props) {
     setResult(null);
     setCard(null);
     setTeamCard(emptyTeamCard());
-    setTeamExample(null);
     setTeamBilling({ name: "", line1: "", city: "", state: "", postal_code: "", country: "US" });
     setAddr(null);
     setSession("");
@@ -349,14 +344,9 @@ export function OrderNew({ onRecord }: Props) {
       </Button>
     </Group>
   ) : null;
-  // 双栏（配置 | 卡片）只在「已经建单」且走浏览器模式时出现。
-  // 未建单必须单栏，否则「生成结账」按钮会被放进右栏而看不到；
-  // 协议模式也是单栏居中，卡片区不会挤到右侧窄栏。
-  const showTeamPayment = teamOrder && step < 2 && payMode === "browser" && Boolean(order);
-
   return (
     <form onSubmit={submit}>
-      <div className={`order-layout${showTeamPayment ? " order-layout--team" : ""}`}>
+      <div className="order-layout">
         <Paper className="order-main" withBorder p="lg" radius="md">
           <Stepper active={step} size="sm" mb="lg" allowNextStepsSelect={false}>
             <Stepper.Step label="配置订单" description="session、套餐、地区" />
@@ -366,20 +356,6 @@ export function OrderNew({ onRecord }: Props) {
 
           {order?.checkout_url && step >= 1 && (
             <CheckoutLinkCard url={order.checkout_url} />
-          )}
-
-          {step < 2 && !linkOnly && (
-            <SegmentedControl
-              fullWidth
-              mb="lg"
-              value={payMode}
-              onChange={(value) => setPayMode(value as "browser" | "protocol")}
-              disabled={busy || Boolean(order)}
-              data={[
-                { value: "browser", label: "官方结账流（站内填卡）" },
-                { value: "protocol", label: "协议支付（可选 Stripe 输入框 / 纯协议）" },
-              ]}
-            />
           )}
 
           {step === 0 && (
@@ -540,55 +516,13 @@ export function OrderNew({ onRecord }: Props) {
             />
           )}
 
-          {step === 1 && order && payMode === "browser" && !teamOrder && !linkOnly && addr && (
-            <Stack gap="lg">
-              {hosted && (
-                <Alert color="blue" variant="light">
-                  Team 托管结账已就绪：直接在下面填卡即可完成支付。如站内支付被拒，也可以
-                  <Anchor href={order.checkout_url || "#"} target="_blank" rel="noreferrer">
-                    打开长链
-                  </Anchor>
-                  手动付款，付完回本页点「我已支付，查询订阅」。
-                </Alert>
-              )}
-              <Text fw={600}>账单地址</Text>
-              <BillingForm value={addr} onChange={setAddr} disabled={busy} />
-              <div>
-                <Text fw={600} mb="xs">
-                  卡片
-                </Text>
-                <StripeCardFields
-                  publishableKey={order.publishable_key || ""}
-                  amount={order.amount}
-                  currency={order.currency}
-                  customerSessionClientSecret={order.customer_session_client_secret}
-                  checkoutUrl={order.checkout_url}
-                  confirmReturnUrl={order.confirm_return_url}
-                  requireSaveChoice={Boolean(order.promo_campaign_id)}
-                  onReady={setCard}
-                />
-              </div>
-            </Stack>
-          )}
 
           {step === 2 && result && <ResultPanel order={result} onReset={reset} />}
 
-          {!showTeamPayment && errorAlert}
-          {!showTeamPayment && primaryAction}
+          {errorAlert}
+          {primaryAction}
         </Paper>
 
-        {showTeamPayment && order && (
-          <div className="order-payment">
-            <TeamPaymentPanel card={teamCard} onCard={setTeamCard}
-              billing={teamBilling} onBilling={setTeamBilling} order={order} busy={busy}
-              onExample={() => {
-                const example = randomBillingExample(teamBilling);
-                setTeamBilling(example); setTeamExample(example); setError(null);
-              }}
-              hasExample={Boolean(teamExample)}
-              footer={<>{errorAlert}{primaryAction}</>} />
-          </div>
-        )}
 
         <div className="order-side">
           <OrderSummary plan={plan} country={country} order={order} seats={team.seats} />
