@@ -30,6 +30,7 @@ from urllib.parse import urlencode
 import httpx
 
 from gss_contracts.errors import DomainError, ErrorCode
+from gss_core.proxies import rotate_proxy_sid
 from gss_core.chatgpt import (
     STRIPE_API_VERSION,
     STRIPE_BASE,
@@ -123,6 +124,19 @@ class PlusProtocol:
                 },
             )
         return self._http
+
+    def rotate_proxy_sid(self) -> None:
+        """换出口 SID（地区不变）。代理抽到坏出口时用。"""
+        if not self.proxy:
+            return
+        try:
+            self.proxy = rotate_proxy_sid(self.proxy)
+        except Exception:
+            return
+        log(f"   轮换出口 SID → {self.proxy.split('@')[-1]}")
+        self.close()
+        self.client = ChatGPTClient.from_raw_session(self.session, proxy=self.proxy)
+        self.client.timeout = self.timeout
 
     # ── ② pm_ ────────────────────────────────────────────
     def create_payment_method(self) -> str:
@@ -444,8 +458,23 @@ class PlusProtocol:
         return out
 
     # ── 便捷入口 ──────────────────────────────────────────
-    def pay_from_url(self) -> PaymentOutcome:
-        try:
-            return self.pay()
-        finally:
-            self.close()
+    def pay_from_url(self, retries: int = 3) -> PaymentOutcome:
+        """遇到代理故障（SSL/EOF/连接错误）时轮换 SID 重试。"""
+        last_exc: Optional[Exception] = None
+        for attempt in range(retries):
+            try:
+                return self.pay()
+            except DomainError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                msg = str(exc)
+                if not any(k in msg for k in ("SSL", "EOF", "ConnectError", "TLS")):
+                    raise
+                if attempt == retries - 1:
+                    raise
+                log(f"   代理故障（第 {attempt + 1}/{retries} 次），轮换重试")
+                self.rotate_proxy_sid()
+        raise last_exc if last_exc else DomainError(
+            ErrorCode.CHECKOUT_UPSTREAM_ERROR, "协议支付重试失败"
+        )

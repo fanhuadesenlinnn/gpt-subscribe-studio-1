@@ -885,10 +885,8 @@ async def pay_order_protocol(order_id: str, payload: ProtocolPayRequest) -> Prot
             )
             # 浏览器 Stripe 输入框已换好 pm_ 时复用它，服务端不再提交卡号
             pp.external_pm = pm_id
-            try:
-                return pp.pay()
-            finally:
-                pp.close()
+            # pay_from_url 内含代理轮换重试，结束时自己关闭客户端
+            return pp.pay_from_url()
         sp = StripeProtocol(
             proxy=proxy, captcha_key=captcha_key, captcha_url=captcha_url,
             card=card, billing=billing,

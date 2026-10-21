@@ -231,6 +231,23 @@ API 层通过二选一的字段区分：
 
 **4 / 4 拿到拒卡。** 单次耗时约 14 秒（含两次 ctoken 与 Stripe intent 确认）。
 
+Pro（$200/月）单独验证过，走同一条 custom 链路：
+
+```
+plan=pro  amount=200.00 USD  kind=custom
+→ card_declined / generic_decline
+```
+
+### 代理出口的两个坑
+
+- **地区必须显式对齐**：网关配置里的用户名是 `-region-JP-`，
+  不调 `align_proxy_region(..., "US")` 会抽到日本出口，
+  Stripe 直接回 `billing country must match`。
+- **SID 固定 = 坏出口会一直坏**：代理抽到坏 IP 时表现为
+  `SSL: UNEXPECTED_EOF_WHILE_READING` 或 `TLS connect error`。
+  `PlusProtocol.pay_from_url()` 遇到这类错误会轮换 SID 重试，最多 3 次。
+  实测该代理约 17% 的连接会失败。
+
 ### 耗时
 
 | 项目 | 数值 |
