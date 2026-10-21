@@ -56,6 +56,9 @@ const DEFAULT_HOST = process.env.HCAPTCHA_HOST || 'b.stripecdn.com';
 const TOKEN_TIMEOUT_MS = Number(process.env.TOKEN_TIMEOUT_MS || 90000);
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 600000);
 const MAX_SESSIONS = Number(process.env.MAX_SESSIONS || 8);
+// YesCaptcha 打码（答题产品 HCaptchaClassification）
+const CAPTCHA_KEY = process.env.GSS_CAPTCHA_API_KEY || process.env.YESCAPTCHA_KEY || '';
+const CAPTCHA_URL = process.env.YESCAPTCHA_URL || 'https://api.yescaptcha.com';
 // 必须与 navigator.platform / userAgentData.platform 自洽。
 // 之前这里是 Windows UA 配 Linux platform，是最典型的交叉验证破绽。
 const DEFAULT_UA =
@@ -1210,7 +1213,11 @@ class Session {
       // 完整导出 canvas（题目可能是 canvas 渲染的线条/图片）
       const canvases = [...document.querySelectorAll('canvas')].map((c, i) => {
         try {
-          return { i, w: c.width, h: c.height, dataUrl: c.toDataURL('image/png') };
+          // 打码接口建议直接给 canvas 导出的原图，并转 JPG 压小体积
+          let jpg = '';
+          try { jpg = c.toDataURL('image/jpeg', 0.92); } catch (e2) {}
+          return { i, w: c.width, h: c.height,
+                   dataUrl: c.toDataURL('image/png'), jpg };
         } catch (e) { return { i, err: String(e).slice(0, 60) }; }
       });
       // 9 宫格图可能用 background-image（hcaptcha.com / blob: / data:）
@@ -1238,7 +1245,96 @@ class Session {
           h: Math.round(r.height),
         };
       }).filter((c) => c.w > 20 && c.h > 20);
-      return { prompt, header, imgs, bgImages: bgs, canvases, cells, frameUrl: location.href.slice(0, 160) };
+      // 示例小图（anchors）：题目栏右上角那张参照图。
+      // hCaptcha 的题干区在上方，示例图是其中唯一带 hcaptcha/newassets/blob/data 图源的元素。
+      const vh = window.innerHeight;
+      const headerImgs = []
+        .concat([...document.querySelectorAll('img')].map((d) => {
+          const r = d.getBoundingClientRect();
+          return { kind: 'img', src: d.src || '', x: Math.round(r.x), y: Math.round(r.y),
+                   w: Math.round(r.width), h: Math.round(r.height) };
+        }))
+        .concat([...document.querySelectorAll('div,span,a,button')].map((d) => {
+          const bi = getComputedStyle(d).backgroundImage || '';
+          const m = bi.match(/url\("?([^")]+)"?\)/);
+          if (!m) return null;
+          const r = d.getBoundingClientRect();
+          return { kind: 'bg', src: m[1], x: Math.round(r.x), y: Math.round(r.y),
+                   w: Math.round(r.width), h: Math.round(r.height) };
+        }).filter(Boolean))
+        .filter((v) => v.w >= 24 && v.h >= 24 && v.y < vh * 0.45)
+        .filter((v) => /hcaptcha|newassets|blob:|data:image/.test(v.src));
+      return { prompt, header, imgs, bgImages: bgs, canvases, cells, headerImgs,
+               vw: window.innerWidth, vh, dpr: window.devicePixelRatio,
+               frameUrl: location.href.slice(0, 160) };
+    }).catch(() => null);
+  }
+
+  /**
+   * 把挑战 canvas 切成 3×3 的 9 张图，用于 HCaptchaClassification 的九宫格模式。
+   * 先按「与面板底色差异」找出真正的图片区域，排除上方黑边与面板留白。
+   * 返回每格在 canvas 内的像素框，便于把答案映射回来点击。
+   */
+  async gridTiles() {
+    const fr = this.page.frames().find((f) => /challenge/.test(f.url()));
+    if (!fr) return null;
+    return fr.evaluate(() => {
+      const c = document.querySelector('canvas');
+      if (!c) return null;
+      const W = c.width, H = c.height;
+      const ctx = c.getContext('2d');
+      let data;
+      try { data = ctx.getImageData(0, 0, W, H).data; } catch (e) { return null; }
+
+      const px = (x, y) => {
+        const i = (y * W + x) * 4;
+        return [data[i], data[i + 1], data[i + 2]];
+      };
+      // 面板底色取 canvas 中部偏上的一个点（黑边之下的第一处浅色）
+      let bg = null;
+      for (let y = 0; y < H && !bg; y += 4) {
+        const p = px(Math.floor(W / 2), y);
+        if (p[0] > 180 && p[1] > 180 && p[2] > 180
+            && Math.abs(p[0] - p[1]) < 12 && Math.abs(p[1] - p[2]) < 12) bg = p;
+      }
+      if (!bg) bg = [235, 235, 235];
+      const isContent = (p) => {
+        const d = Math.abs(p[0] - bg[0]) + Math.abs(p[1] - bg[1]) + Math.abs(p[2] - bg[2]);
+        return d > 60;
+      };
+      // 扫描内容 bbox
+      let minX = W, minY = H, maxX = -1, maxY = -1;
+      for (let y = 0; y < H; y += 2) {
+        for (let x = 0; x < W; x += 2) {
+          if (isContent(px(x, y))) {
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+          }
+        }
+      }
+      if (maxX < 0) return null;
+      const cw = (maxX - minX) / 3, chh = (maxY - minY) / 3;
+      const boxes = [];
+      for (let r = 0; r < 3; r++) {
+        for (let col = 0; col < 3; col++) {
+          // 每格内收 6%，避开格间白色缝隙
+          const inset = 0.06;
+          const x = Math.round(minX + col * cw + cw * inset);
+          const y = Math.round(minY + r * chh + chh * inset);
+          const w = Math.round(cw * (1 - inset * 2));
+          const h = Math.round(chh * (1 - inset * 2));
+          boxes.push({ x, y, w, h });
+        }
+      }
+      const tiles = boxes.map((b) => {
+        const t = document.createElement('canvas');
+        t.width = b.w; t.height = b.h;
+        t.getContext('2d').drawImage(c, b.x, b.y, b.w, b.h, 0, 0, b.w, b.h);
+        return t.toDataURL('image/jpeg', 0.92).split(',').pop();
+      });
+      return { W, H, bbox: { minX, minY, maxX, maxY }, boxes, tiles };
     }).catch(() => null);
   }
 
@@ -1247,6 +1343,50 @@ class Session {
    * 用于任意位置的题目（如「点击两条较短的线」），不依赖 9 宫格布局。
    * coords: [[xN, yN], ...]  xN/yN 是相对于题目 canvas 的归一化坐标。
    */
+  /** 在挑战 canvas 上执行一次拖拽。start/end 为 canvas 归一化坐标。 */
+  async dragOnCanvas(startNorm, endNorm) {
+    const frameEl = await this.page.$('iframe[src*="frame=challenge"]');
+    if (!frameEl) return { error: 'no_challenge_iframe' };
+    const box = await frameEl.boundingBox();
+    if (!box) return { error: 'no_iframe_box' };
+    const cands = this.page.frames().filter((f) => /challenge|newassets/.test(f.url()));
+    let canvas = null;
+    for (const f of cands) {
+      try {
+        const info = await f.evaluate(() => {
+          const all = [...document.querySelectorAll('canvas')].map((c) => {
+            const r = c.getBoundingClientRect();
+            return { x: r.x, y: r.y, w: r.width, h: r.height, cw: c.width, ch: c.height };
+          });
+          const big = all.filter((c) => c.w > 80 && c.h > 80)
+            .sort((a, b) => (b.w * b.h) - (a.w * a.h));
+          return big[0] || null;
+        });
+        if (info) { canvas = info; break; }
+      } catch (_) {}
+    }
+    if (!canvas) return { error: 'no_canvas' };
+    const px = (n) => [box.x + canvas.x + n[0] * canvas.w,
+                       box.y + canvas.y + n[1] * canvas.h];
+    const [sx, sy] = px(startNorm);
+    const [ex, ey] = px(endNorm);
+    await this.page.mouse.move(sx, sy);
+    await sleep(150);
+    await this.page.mouse.down();
+    await sleep(120);
+    const steps = 14;
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      await this.page.mouse.move(sx + (ex - sx) * t, sy + (ey - sy) * t);
+      await sleep(25 + Math.random() * 25);
+    }
+    await sleep(180);
+    await this.page.mouse.up();
+    await sleep(700);
+    return { start: [Math.round(sx), Math.round(sy)],
+             end: [Math.round(ex), Math.round(ey)], steps };
+  }
+
   async answerChallengeAt(coords) {
     const frameEl = await this.page.$('iframe[src*="frame=challenge"]');
     if (!frameEl) return { error: 'no_challenge_iframe' };
@@ -1645,6 +1785,363 @@ const server = http.createServer(async (req, res) => {
 
   // 一次性完成：出题 -> 导出 canvas -> (可选)按坐标作答 -> 拿 token
   // { session_id, coords?: [[x,y],...], submit?: true, timeout_ms? }
+  // 九宫格全流程：切图 → HCaptchaClassification → 点击 → 提交 → 取 token。
+  if (req.method === 'POST' && url.pathname === '/answer') {
+    const body = await readBody(req);
+    const s = sessions.get((body && body.session_id) || '');
+    if (!s) return send(404, { error: 'no_session' });
+    const ck = CAPTCHA_KEY;
+    if (!ck) return send(400, { error: 'no_captcha_key' });
+    try {
+      s.busy = true;
+      const out = await s.withLock(async () => {
+        const solved = await s.solve({
+          sitekey: body.sitekey || DEFAULT_SITEKEY,
+          rqdata: body.rqdata || '',
+          host: body.host || DEFAULT_HOST,
+          timeout: Number(body.timeout_ms || 45000),
+        });
+        if (solved.token) return { phase: 'solved_direct', token: solved.token,
+                                   tokenLen: solved.token.length };
+        const ch = solved.challenge || await s.captureChallenge().catch(() => null);
+        if (!ch) return { phase: 'error', error: 'no_capture' };
+
+        let question = String(ch.prompt || '');
+        question = question.replace(/Please select an image to report\.?/gi, '')
+                           .replace(/Please try again\.?/gi, '')
+                           .replace(/\s+/g, ' ').trim();
+
+        // anchors
+        const anchors = [];
+        for (const hi of (ch.headerImgs || [])) {
+          if (!/imgs\d*\.hcaptcha\.com/.test(hi.src || '')) continue;
+          try {
+            const r = await fetch(hi.src);
+            anchors.push(Buffer.from(await r.arrayBuffer()).toString('base64'));
+          } catch (e) {}
+        }
+
+        const isDrag = /drag/i.test(question);
+        const cv0 = (ch.canvases || [])[0];
+        if (!cv0 || !cv0.jpg) return { phase: 'error', error: 'no_canvas', question };
+        const oneQuery = [String(cv0.jpg).split(',').pop()];
+
+        // 先尝试九宫格切分；背景铺满整张画布时说明不是九宫格
+        let g = null;
+        if (!isDrag) {
+          g = await s.gridTiles().catch(() => null);
+          if (g && g.bbox) {
+            const fullW = (g.bbox.maxX - g.bbox.minX) / g.W;
+            const fullH = (g.bbox.maxY - g.bbox.minY) / g.H;
+            if (fullW > 0.9 && fullH > 0.9) g = null;   // 满幅图，不是九宫格
+          }
+        }
+
+        const useGrid = !!g && Array.isArray(g.tiles) && g.tiles.length === 9;
+        const task = {
+          type: 'HCaptchaClassification',
+          queries: useGrid ? g.tiles : oneQuery,
+        };
+        if (question) task.question = question;
+        if (anchors.length) task.anchors = anchors;
+
+        let sol = null;
+        try {
+          const cr = await fetch(`${CAPTCHA_URL}/createTask`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ clientKey: ck, task }),
+          });
+          const cj = await cr.json();
+          if (cj && cj.errorId) {
+            return { phase: 'error', error: cj.errorCode,
+                     desc: String(cj.errorDescription || '').slice(0, 140),
+                     question, mode: useGrid ? 'grid' : (isDrag ? 'drag' : 'click') };
+          }
+          sol = cj.solution || null;
+        } catch (e) {
+          return { phase: 'error', error: 'classify_failed', desc: String(e).slice(0, 140), question };
+        }
+        if (!sol) return { phase: 'error', error: 'empty_solution', question };
+        const mode = useGrid ? 'grid' : (isDrag ? 'drag' : 'click');
+
+        // 拖拽题：文档要求 queries 里同时含「可拖小块」和「目标位置」，
+        // 所以发整个 iframe 截图，并直接按截图坐标系做拖拽。
+        if (mode === 'drag') {
+          let shotB64 = '';
+          try {
+            const el = await s.page.$('iframe[src*="frame=challenge"]');
+            const bx = el && await el.boundingBox();
+            if (bx) {
+              const png = await s.page.screenshot({
+                clip: { x: Math.max(0, bx.x), y: Math.max(0, bx.y),
+                        width: Math.min(bx.width, 2000), height: Math.min(bx.height, 2000) },
+              });
+              require('fs').writeFileSync('/opt/gss/data/last_drag_shot.png', png);
+              shotB64 = png.toString('base64');
+              const dTask = { type: 'HCaptchaClassification', queries: [shotB64] };
+              if (question) dTask.question = question;
+              const dr0 = await fetch(`${CAPTCHA_URL}/createTask`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ clientKey: ck, task: dTask }),
+              });
+              const dj = await dr0.json();
+              if (dj && dj.errorId) {
+                return { phase: 'error', error: dj.errorCode, question, mode };
+              }
+              sol = dj.solution || null;
+              const dbox = sol && sol.box;
+              let st2 = null, en2 = null;
+              if (Array.isArray(dbox) && dbox.length && typeof dbox[0] === 'object') {
+                st2 = dbox[0].start; en2 = dbox[0].end;
+              } else if (Array.isArray(dbox) && dbox.length >= 4) {
+                st2 = [Number(dbox[0]), Number(dbox[1])];
+                en2 = [Number(dbox[2]), Number(dbox[3])];
+              }
+              if (!st2 || !en2) return { phase: 'error', error: 'drag_no_coords',
+                                         question, solution: sol };
+              // 截图坐标即 iframe 内坐标，加上 iframe 原点就是页面坐标
+              const ax0 = bx.x + Number(st2[0]), ay0 = bx.y + Number(st2[1]);
+              const ax1 = bx.x + Number(en2[0]), ay1 = bx.y + Number(en2[1]);
+              await s.page.mouse.move(ax0, ay0);
+              await sleep(150);
+              await s.page.mouse.down();
+              await sleep(140);
+              for (let i = 1; i <= 16; i++) {
+                const t = i / 16;
+                await s.page.mouse.move(ax0 + (ax1 - ax0) * t, ay0 + (ay1 - ay0) * t);
+                await sleep(22 + Math.random() * 22);
+              }
+              await sleep(200);
+              await s.page.mouse.up();
+              await sleep(900);
+              let tok2 = '';
+              try { tok2 = await s.readPendingToken(); } catch (e) {}
+              const again = await s.captureChallenge().catch(() => null);
+              const sub2 = tok2 ? null : await s.submitChallenge().catch(() => null);
+              if (!tok2) { try { tok2 = await s.readPendingToken(); } catch (e) {} }
+              return { phase: tok2 ? 'answered' : 'answer_not_accepted', mode,
+                       question, dragStart: st2, dragEnd: en2,
+                       page: [[Math.round(ax0), Math.round(ay0)], [Math.round(ax1), Math.round(ay1)]],
+                       after: (again && again.prompt) || '',
+                       submit: sub2, token: tok2, tokenLen: tok2 ? tok2.length : 0,
+                       solution: sol };
+            }
+          } catch (e) {
+            return { phase: 'error', error: 'drag_failed', desc: String(e).slice(0, 140) };
+          }
+        }
+
+        // 旧拖拽分支（canvas 坐标系，留作兜底）
+        if (mode === 'drag' && false) {
+          const bx = sol.box;
+          let st = null, en = null;
+          if (Array.isArray(bx) && bx.length && typeof bx[0] === 'object') {
+            st = bx[0].start; en = bx[0].end;
+          } else if (Array.isArray(bx) && bx.length >= 4) {
+            st = [Number(bx[0]), Number(bx[1])]; en = [Number(bx[2]), Number(bx[3])];
+          }
+          if (!st || !en) return { phase: 'error', error: 'drag_no_coords', question, solution: sol };
+          const dr = await s.dragOnCanvas([st[0] / cv0.w, st[1] / cv0.h],
+                                          [en[0] / cv0.w, en[1] / cv0.h]);
+          let token = '';
+          try { token = await s.readPendingToken(); } catch (e) {}
+          return { phase: token ? 'answered' : 'answer_not_accepted', mode, question,
+                   drag: { start: st, end: en }, action: dr, token,
+                   tokenLen: token ? token.length : 0 };
+        }
+
+        // 点击类：解析命中格子/坐标
+        let coords = [];
+        let picked = [];
+        if (useGrid) {
+          if (Array.isArray(sol.objects)) {
+            sol.objects.forEach((v, i) => { if (v) picked.push(i); });
+          } else if (Array.isArray(sol.top_k)) {
+            picked = sol.top_k.map(Number).filter((n) => n >= 0 && n < 9);
+          }
+          coords = picked.map((i) => {
+            const b = g.boxes[i];
+            return [(b.x + b.w / 2) / g.W, (b.y + b.h / 2) / g.H];
+          });
+        } else {
+          const bx = Array.isArray(sol.box) ? sol.box.map(Number) : [];
+          for (let i = 0; i + 1 < bx.length; i += 2) {
+            coords.push([bx[i] / cv0.w, bx[i + 1] / cv0.h]);
+          }
+          picked = coords.map((_, i) => i);
+        }
+        if (!coords.length) return { phase: 'empty', mode, question, solution: sol };
+
+        const ans = await s.answerChallengeAt(coords);
+        const sub = await s.submitChallenge();
+        let token = '';
+        try { token = await s.readPendingToken(); } catch (e) {}
+        return {
+          phase: token ? 'answered' : 'answer_not_accepted',
+          mode,
+          question,
+          picked,
+          coords: coords.map((c) => [Math.round(c[0] * 1000) / 1000,
+                                     Math.round(c[1] * 1000) / 1000]),
+          bbox: g ? g.bbox : null,
+          solution: sol,
+          answer: ans,
+          submit: sub,
+          token,
+          tokenLen: token ? token.length : 0,
+        };
+      });
+      return send(200, out);
+    } catch (e) {
+      return send(500, { error: String(e).slice(0, 200) });
+    } finally {
+      s.busy = false;
+    }
+  }
+
+  // 捕获挑战后交给 YesCaptcha 的 HCaptchaClassification 判题，只返回答案，不点击。
+  if (req.method === 'POST' && url.pathname === '/classify') {
+    const body = await readBody(req);
+    const s = sessions.get((body && body.session_id) || '');
+    if (!s) return send(404, { error: 'no_session' });
+    const ck = CAPTCHA_KEY;
+    if (!ck) return send(400, { error: 'no_captcha_key' });
+    try {
+      s.busy = true;
+      const out = await s.withLock(async () => {
+        const solved = await s.solve({
+          sitekey: body.sitekey || DEFAULT_SITEKEY,
+          rqdata: body.rqdata || '',
+          host: body.host || DEFAULT_HOST,
+          timeout: Number(body.timeout_ms || 45000),
+        });
+        if (solved.token) return { phase: 'solved', tokenLen: solved.token.length };
+        const ch = solved.challenge || await s.captureChallenge().catch(() => null);
+        if (!ch) return { phase: 'challenge', error: 'no_capture' };
+
+        // 题干：去掉 hCaptcha 追加的两句噪音
+        let question = String(ch.prompt || '');
+        question = question.replace(/Please select an image to report\.?/gi, '')
+                           .replace(/Please try again\.?/gi, '')
+                           .replace(/\s+/g, ' ').trim();
+
+        // anchors：题目栏里来自 imgs*.hcaptcha.com 的示例小图
+        const anchors = [];
+        const anchorMeta = [];
+        for (const hi of (ch.headerImgs || [])) {
+          if (!/imgs\d*\.hcaptcha\.com/.test(hi.src || '')) continue;
+          try {
+            const r = await fetch(hi.src);
+            const buf = Buffer.from(await r.arrayBuffer());
+            anchors.push(buf.toString('base64'));
+            anchorMeta.push({ w: hi.w, h: hi.h, bytes: buf.length });
+            try { require('fs').writeFileSync('/opt/gss/data/last_anchor.bin', buf); } catch (e3) {}
+          } catch (e) {}
+        }
+
+        const cv = (ch.canvases || [])[0];
+        if (!cv || !cv.jpg) return { phase: 'challenge', error: 'no_canvas', question };
+        const queries = [String(cv.jpg).split(',').pop()];
+
+        const task = { type: 'HCaptchaClassification', queries };
+        if (question) task.question = question;
+        if (anchors.length) task.anchors = anchors;
+        let sol = null;
+        try {
+          const cr = await fetch(`${CAPTCHA_URL}/createTask`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ clientKey: ck, task }),
+          });
+          const cj = await cr.json();
+          if (cj && !cj.errorId && cj.solution) sol = cj.solution;
+          else if (cj && cj.errorId) return { phase: 'classify', error: cj.errorCode,
+                                              desc: String(cj.errorDescription || '').slice(0, 120),
+                                              question };
+        } catch (e) {
+          return { phase: 'classify', error: 'classify_fetch_failed',
+                   desc: String(e).slice(0, 120), question };
+        }
+        try {
+          const el = await s.page.$('iframe[src*="frame=challenge"]');
+          if (el) {
+            const bx = await el.boundingBox();
+            if (bx) {
+              const png = await s.page.screenshot({
+                clip: { x: Math.max(0, bx.x), y: Math.max(0, bx.y),
+                        width: Math.min(bx.width, 2000), height: Math.min(bx.height, 2000) },
+              });
+              require('fs').writeFileSync('/opt/gss/data/last_shot.png', png);
+            }
+          }
+        } catch (e4) {}
+        return {
+          phase: 'classify', question,
+          canvas: { w: cv.w, h: cv.h },
+          anchors: anchorMeta,
+          queriesLen: queries[0] ? queries[0].length : 0,
+          solution: sol,
+          jpg: String(cv.jpg),
+        };
+      });
+      return send(200, out);
+    } catch (e) {
+      return send(500, { error: String(e).slice(0, 200) });
+    } finally {
+      s.busy = false;
+    }
+  }
+
+  // 只出题、只捕获，不做视觉判断。用于核对九宫格格子与示例小图的几何。
+  if (req.method === 'POST' && url.pathname === '/capture') {
+    const body = await readBody(req);
+    const s = sessions.get((body && body.session_id) || '');
+    if (!s) return send(404, { error: 'no_session' });
+    try {
+      s.busy = true;
+      const out = await s.withLock(async () => {
+        const solved = await s.solve({
+          sitekey: body.sitekey || DEFAULT_SITEKEY,
+          rqdata: body.rqdata || '',
+          host: body.host || DEFAULT_HOST,
+          timeout: Number(body.timeout_ms || 45000),
+        });
+        if (solved.token) return { phase: 'solved', tokenLen: solved.token.length };
+        const ch = solved.challenge || await s.captureChallenge().catch(() => null);
+        let shot = null;
+        try {
+          const el = await s.page.$('iframe[src*="frame=challenge"]');
+          if (el) {
+            const bx = await el.boundingBox();
+            if (bx) {
+              shot = await s.page.screenshot({
+                clip: { x: Math.max(0, bx.x), y: Math.max(0, bx.y),
+                        width: Math.min(bx.width, 2000), height: Math.min(bx.height, 2000) },
+                encoding: 'base64',
+              });
+            }
+          }
+        } catch (e) {}
+        const slim = ch ? {
+          prompt: ch.prompt, header: ch.header,
+          vw: ch.vw, vh: ch.vh, dpr: ch.dpr,
+          cells: ch.cells, headerImgs: ch.headerImgs, imgsN: (ch.imgs || []).length,
+          bgN: (ch.bgImages || []).length,
+          canvases: (ch.canvases || []).map((c) => ({ i: c.i, w: c.w, h: c.h,
+            len: c.dataUrl ? c.dataUrl.length : 0, err: c.err })),
+          frameUrl: ch.frameUrl,
+        } : null;
+        return { phase: 'challenge', capture: slim, shotLen: shot ? shot.length : 0, shot };
+      });
+      return send(200, out);
+    } catch (e) {
+      return send(500, { error: String(e).slice(0, 200) });
+    } finally {
+      s.busy = false;
+    }
+  }
+
   if (req.method === 'POST' && url.pathname === '/solve-then-answer') {
     const body = await readBody(req);
     const s = sessions.get((body && body.session_id) || '');
