@@ -2841,3 +2841,63 @@ passive token 省略 / 空串 / 真实值
 
 单次成本：一次 confirm + 若干 Stripe API 调用，无打码费用、无浏览器开销。
 要提高产出只能靠换商户/换结账流程，而不是改我们自己这边的信号。
+
+## 三十二、rv_timestamp 的逆向结果（第 27 轮）
+
+### 32.1 定位：它只是一个透传参数
+
+抓取 HAR（605 条记录）里加载的**全部 131 个 JS**，只有两个文件出现 `rv_timestamp`：
+
+```
+js.stripe.com/v3/fingerprinted/js/checkout-app-init-6a738991...js   (2.5 MB)
+js.stripe.com/v3/fingerprinted/js/controller-102d3191e5c6...js      (1.7 MB)
+```
+
+`checkout-app-init` 里的用法：
+
+```js
+_ ? { rv_timestamp: _ } : null      // _ 是函数第 12 个入参，直接拼进 confirm 请求体
+```
+
+`controller` 里的用法：
+
+```js
+QE = { ..., rv_timestamp: Q.Yj, ... }   // 只是请求体的 schema 类型声明（string）
+```
+
+**两处都只是拼装/声明，生成逻辑不在其中。**
+
+### 32.2 不在服务端 init 响应里
+
+实测调用 `payment_pages/{cs}/init`，完整响应里：
+
+```
+"rv_timestamp" in response  →  False
+按 43 字符集 + 120..400 长度扫描   →  无候选
+```
+
+所以不是服务端下发的。
+
+### 32.3 生成器不在任何已加载的 bundle 里
+
+用那个独特的 43 字符集去搜全部 131 个 JS：
+
+```
+字符集  #$&;<=>?CDLMNOPQRTUXY[\]^_`bdenoqrstuvwxyz{   命中 0 个文件
+长度 212 附近 + random/fromCharCode 组合              命中 0 个文件
+```
+
+字符集必须等于上面这 43 个符号才可能是生成器，全mỗi scrub 过一遍都没有。
+
+### 32.4 结论：它不是挑战的开关
+
+三条实证：
+
+1. 生产代码本来就用**完全相同的 43 字符集、212 长度**生成它（`_make_rv_timestamp`），
+   HAR 样本的每个字符都落在该字符集内 —— 形状是对的
+2. 探针补上它之后，4/4 仍然返回 `intent_confirmation_challenge`
+3. 我们传随机值，Stripe 既不报 400 也不报字段错误 —— 说明它不做完整性校验，
+   不是带签名的凭证
+
+因此它无法成为「绕过挑战」的手段。要在本地复现它的确切取值，只能在真实结账页
+运行时 hook（那等于跑真实浏览器流程，与全协议相悖），而且复现了也不会改变挑战结果。
