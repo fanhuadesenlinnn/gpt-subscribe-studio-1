@@ -39,6 +39,9 @@ interface Props {
   checkoutUrl?: string | null;
   /** 从 accessToken 解析出的账户邮箱，用于预填账单邮箱 */
   sessionEmail?: string | null;
+  /** 取 pm_ 的方式；由上层持有，提链前就能选 */
+  pmMode: "server" | "stripe";
+  onPmMode?: (mode: "server" | "stripe") => void;
   disabled?: boolean;
   onDone?: (result: ProtocolPayResult) => void;
   /** 重新向 Stripe 读一次金额（报价超时会用） */
@@ -119,7 +122,7 @@ const STEPS = [
 
 export function ProtocolPayPanel({
   orderId, country, amount, currency, quotationError, exitLabel, sessionEmail,
-  publishableKey,
+  publishableKey, pmMode, onPmMode,
   checkoutUrl, disabled, onDone, onRefreshQuote,
 }: Props) {
   const [card, setCard] = useState<CardDraft>(EMPTY_CARD);
@@ -134,10 +137,7 @@ export function ProtocolPayPanel({
     };
     return randomBillingExample(base);
   });
-  // 取 pm_ 的方式：
-  //   server —— 服务端直接提交卡号（协议模式，默认）
-  //   stripe —— 浏览器 Stripe 输入框换 pm_（卡号只进 Stripe iframe）
-  const [pmMode, setPmMode] = useState<"server" | "stripe">("server");
+  // 取 pm_ 的方式由上层持有（提链前就能选），这里只保留输入框句柄
   const [stripeCard, setStripeCard] = useState<StripeCardHandle | null>(null);
   const [proxy, setProxy] = useState("");
   // 协议链路的可选环节，全部默认关闭 = 与 scripts/run_cards.py 一致的批量模式
@@ -290,7 +290,7 @@ export function ProtocolPayPanel({
         fullWidth
         mb="md"
         value={pmMode}
-        onChange={(value) => setPmMode(value as "server" | "stripe")}
+        onChange={(value) => onPmMode?.(value as "server" | "stripe")}
         disabled={busy}
         data={[
           { value: "server", label: "协议提交（服务端提交卡号）" },

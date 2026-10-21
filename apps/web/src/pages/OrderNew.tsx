@@ -1,4 +1,4 @@
-import { Alert, Button, Group, Paper, Select, Stack, Stepper, Text } from "@mantine/core";
+import { Alert, Button, Group, Paper, SegmentedControl, Select, Stack, Stepper, Text } from "@mantine/core";
 import { IconAlertCircle, IconCheck } from "@tabler/icons-react";
 import { useEffect, useRef, useState } from "react";
 
@@ -58,6 +58,9 @@ export function OrderNew({ onRecord }: Props) {
   const [busy, setBusy] = useState(false);
   // 支付路径固定为「全协议」：服务端直接打 Stripe，不再提供浏览器/托管长链分支
   const payMode = "protocol" as const;
+  // 取 pm_ 的方式：server = 服务端提交卡号；stripe = 浏览器 Stripe 输入框
+  // 放在顶层，提链前就能选，选完带进支付面板
+  const [pmMode, setPmMode] = useState<"server" | "stripe">("server");
   const hosted = order ? isHostedOrder(order) : plan === "team";
   const teamOrder = (order?.plan ?? plan) === "team";
   // Team 托管结账只要拿到 Stripe 公钥，就能和 Plus 一样站内填卡支付；
@@ -380,6 +383,23 @@ export function OrderNew({ onRecord }: Props) {
                 onTeam={setTeam}
                 disabled={busy}
               />
+              <div>
+                <Text size="sm" fw={600} mb={6}>支付方式</Text>
+                <SegmentedControl
+                  fullWidth
+                  value={pmMode}
+                  onChange={(value) => setPmMode(value as "server" | "stripe")}
+                  disabled={busy || Boolean(order)}
+                  data={[
+                    { value: "server", label: "协议提交（服务端提交卡号）" },
+                    { value: "stripe", label: "Stripe 输入框（浏览器换 pm_）" },
+                  ]}
+                />
+                <Text size="xs" c="dimmed" mt={6}>
+                  协议提交由服务端向 Stripe 换 pm_；Stripe 输入框让卡号只进 Stripe iframe。
+                  两者的服务端链路相同。
+                </Text>
+              </div>
               {plan === "plus" && (
                 <Paper withBorder p="md" radius="md">
                   <Stack gap="sm">
@@ -481,6 +501,8 @@ export function OrderNew({ onRecord }: Props) {
             <ProtocolPayPanel
                 orderId={order.id}
                 sessionEmail={order.session_email}
+              pmMode={pmMode}
+              onPmMode={setPmMode}
                 country={order.billing_country || country}
                 amount={order.amount}
                 currency={order.currency}
