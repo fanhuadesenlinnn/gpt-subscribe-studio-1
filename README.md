@@ -122,6 +122,33 @@ Plus 家族的会话 id 有两种形态，两种都支持：
 ⑥ 判定：拒卡 / 成功 / 需 3DS / 命中 hCaptcha
 ```
 
+### 两种提交方式（界面可切换，默认协议）
+
+Plus / Pro 家族的界面上有「协议提交」与「Stripe 输入框」两个选项：
+
+| 方式 | 卡号经过 | 取 pm_ 的方式 | 适用 |
+|---|---|---|---|
+| **协议提交**（默认） | 本服务 → Stripe API | 服务端 `POST /v1/payment_methods` | 批量、无人值守 |
+| **Stripe 输入框** | 只在浏览器 → Stripe iframe | 浏览器 Stripe.js 产出 `pm_` | 指纹与 Radar 信号最接近真人 |
+
+两种方式在 `pm_` 之后的服务端链路完全相同：
+
+```
+pm_ → ctoken_ → ChatGPT confirm → PaymentIntent → Stripe confirm
+```
+
+API 层通过二选一的字段区分：
+
+```json
+{ "card": {...}, "billing": {...} }              // 协议提交
+{ "payment_method_id": "pm_…", "billing": {...} } // Stripe 输入框
+```
+
+两者都要求 `billing`，且都会走同一套税费同步与保存选择配对逻辑。
+
+**注意**：用 publishable key 造 `pm_` 时必须带 `client_attribution_metadata`，
+否则 Stripe 返回 `This integration surface is unsupported for publishable key tokenization`。
+
 两个容易踩的点：
 
 - **保存选择必须配对**：ctoken 的 `setup_future_usage` 与 confirm 的

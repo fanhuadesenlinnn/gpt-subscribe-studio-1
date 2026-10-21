@@ -13,11 +13,13 @@ import {
   TextInput,
   Timeline,
   Checkbox,
+  SegmentedControl,
 } from "@mantine/core";
 import { IconAlertCircle, IconCheck, IconClock, IconX } from "@tabler/icons-react";
 import { useState } from "react";
 
 import { CheckoutLinkCard } from "./CheckoutLinkCard";
+import { StripeCardFields, type StripeCardHandle } from "../card-payment/CardFields";
 
 import { formatAmount, payProtocol, type BillingInput, type ProtocolPayResult } from "../api/client";
 import { randomBillingExample } from "../card-payment/billingExamples";
@@ -117,6 +119,7 @@ const STEPS = [
 
 export function ProtocolPayPanel({
   orderId, country, amount, currency, quotationError, exitLabel, sessionEmail,
+  publishableKey,
   checkoutUrl, disabled, onDone, onRefreshQuote,
 }: Props) {
   const [card, setCard] = useState<CardDraft>(EMPTY_CARD);
@@ -131,6 +134,11 @@ export function ProtocolPayPanel({
     };
     return randomBillingExample(base);
   });
+  // 取 pm_ 的方式：
+  //   server —— 服务端直接提交卡号（协议模式，默认）
+  //   stripe —— 浏览器 Stripe 输入框换 pm_（卡号只进 Stripe iframe）
+  const [pmMode, setPmMode] = useState<"server" | "stripe">("server");
+  const [stripeCard, setStripeCard] = useState<StripeCardHandle | null>(null);
   const [proxy, setProxy] = useState("");
   // 协议链路的可选环节，全部默认关闭 = 与 scripts/run_cards.py 一致的批量模式
   const [steps, setSteps] = useState({
@@ -163,7 +171,36 @@ export function ProtocolPayPanel({
     }
 
     const payloadBilling = { ...billing, country: (billing.country || "US").toUpperCase() };
+    const shared = { billing: payloadBilling, proxy: proxy.trim() || undefined, steps };
 
+    // ── 方式一：浏览器 Stripe 输入框换 pm_ ──────────────
+    if (pmMode === "stripe") {
+      if (!stripeCard) {
+        return setError("Stripe 输入框还没准备好，请等几秒或刷新页面再试。");
+      }
+      setBusy(true);
+      try {
+        const pmId = await stripeCard.tokenize({
+          name: payloadBilling.name,
+          email: payloadBilling.email || undefined,
+          line1: payloadBilling.line1,
+          city: payloadBilling.city,
+          state: payloadBilling.state,
+          postal_code: payloadBilling.postal_code,
+          country: payloadBilling.country,
+        });
+        const out = await payProtocol(orderId, { ...shared, payment_method_id: pmId });
+        setResult(out);
+        onDone?.(out);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Stripe 输入框支付失败");
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
+    // ── 方式二：服务端提交卡号（协议模式）──────────────
     const number = card.number.replace(/[\s-]/g, "");
     if (!/^\d{12,19}$/.test(number)) return setError("卡号格式不对（12–19 位数字）。");
     if (!/^\d{3,4}$/.test(card.cvc)) return setError("CVC 格式不对（3–4 位）。");
@@ -173,10 +210,8 @@ export function ProtocolPayPanel({
     setBusy(true);
     try {
       const out = await payProtocol(orderId, {
+        ...shared,
         card: { number, cvc: card.cvc, exp_month: card.exp_month, exp_year: card.exp_year },
-        billing: payloadBilling,
-        proxy: proxy.trim() || undefined,
-        steps,
       });
       setResult(out);
       onDone?.(out);
@@ -237,14 +272,55 @@ export function ProtocolPayPanel({
 
       <CheckoutLinkCard url={checkoutUrl} />
 
-      <Alert color="blue" variant="light" icon={<IconAlertCircle size={18} />} title="协议链路">
-        服务端按真实浏览器时序跑完：
-        指纹注册 → init → elements/sessions → tax_region → hCaptcha → confirm → poll。
-        卡号只在本次请求里使用，不落库、不打日志。耗时约 60–180 秒，中途别关页面。
+      <Alert color="blue" variant="light" icon={<IconAlertCircle size={18} />} title="两种提交方式">
+        <Text size="xs">
+          <b>协议提交</b>：卡号发到本服务，服务端直接向 Stripe 换 pm_。可批量、无人值守，
+          卡号不落库、不打日志。
+        </Text>
+        <Text size="xs" mt={4}>
+          <b>Stripe 输入框</b>：卡号只进入 Stripe 的 iframe，浏览器直接换 pm_，
+          指纹与 Radar 信号和真实用户一致。
+        </Text>
+        <Text size="xs" mt={4} c="dimmed">
+          两种方式的服务端链路相同：pm_ → ctoken_ → confirm → PaymentIntent。
+        </Text>
       </Alert>
 
-      <Paper withBorder p="md" radius="md">
-        <Stack gap="sm">
+      <SegmentedControl
+        fullWidth
+        mb="md"
+        value={pmMode}
+        onChange={(value) => setPmMode(value as "server" | "stripe")}
+        disabled={busy}
+        data={[
+          { value: "server", label: "协议提交（服务端提交卡号）" },
+          { value: "stripe", label: "Stripe 输入框（浏览器换 pm_）" },
+        ]}
+      />
+
+      {pmMode === "stripe" ? (
+        <Paper withBorder p="md" radius="md">
+          <Stack gap="sm">
+            {publishableKey ? (
+              <StripeCardFields
+                publishableKey={publishableKey}
+                amount={amount}
+                currency={currency}
+                checkoutUrl={checkoutUrl}
+                requirePaymentMethod
+                disabled={busy}
+                onReady={setStripeCard}
+              />
+            ) : (
+              <Alert color="orange" variant="light" icon={<IconAlertCircle size={16} />}>
+                这个订单没有 publishable_key，挂不了 Stripe 输入框。请改用「协议提交」。
+              </Alert>
+            )}
+          </Stack>
+        </Paper>
+      ) : (
+        <Paper withBorder p="md" radius="md">
+          <Stack gap="sm">
             <TextInput label="卡号" value={card.number} onChange={changeCard("number")}
               inputMode="numeric" autoComplete="off" disabled={busy} placeholder="4242424242424242" />
             <SimpleGrid cols={{ base: 1, xs: 3 }}>
@@ -255,9 +331,9 @@ export function ProtocolPayPanel({
               <PasswordInput label="CVC" value={card.cvc} onChange={changeCard("cvc")}
                 inputMode="numeric" maxLength={4} disabled={busy} />
             </SimpleGrid>
-
-        </Stack>
-      </Paper>
+          </Stack>
+        </Paper>
+      )}
 
       <Paper withBorder p="md" radius="md">
         <Stack gap="sm">
@@ -351,7 +427,7 @@ export function ProtocolPayPanel({
           disabled={disabled || busy || !price}
           onClick={() => void run()}
         >
-          {busy ? "协议支付中…" : !price ? "等待报价" : `确认支付 ${price}`}
+          {busy ? "提交中…" : !price ? "等待报价" : `确认支付 ${price}`}
         </Button>
       </Group>
 

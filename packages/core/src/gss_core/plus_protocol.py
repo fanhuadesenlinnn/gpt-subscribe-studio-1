@@ -82,6 +82,9 @@ class PlusProtocol:
         self.currency = (currency or "USD").upper()
         self.timeout = timeout
         self.payment_method_id = ""
+        # 浏览器 Stripe 输入框已换好的 pm_：给定时跳过服务端提交卡号。
+        # 卡数据经过 Stripe iframe，与真实用户路径一致。
+        self.external_pm = ""
 
         m = _SESSION.search(self.checkout_url)
         self.checkout_id = public_checkout_id(m.group(1) if m else "")
@@ -257,8 +260,13 @@ class PlusProtocol:
         except Exception as exc:  # noqa: BLE001
             log(f"   Sentinel 未拿到，继续：{str(exc)[:100]}")
 
-        # ② pm_
-        pm = self.create_payment_method()
+        # ② pm_（浏览器已产出则复用，服务端不再碰卡号）
+        if self.external_pm:
+            pm = self.external_pm
+            self.payment_method_id = pm
+            log(f"② 复用浏览器产出的 {pm[:14]}…")
+        else:
+            pm = self.create_payment_method()
 
         # ③ ctoken_ + ④ confirm（两者的「保存选择」必须配对）
         log("③ confirmation_tokens + ④ checkout/confirm")

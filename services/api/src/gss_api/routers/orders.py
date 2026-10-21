@@ -883,6 +883,8 @@ async def pay_order_protocol(order_id: str, payload: ProtocolPayRequest) -> Prot
                 publishable_key=publishable_key, card=card, billing=billing,
                 proxy=proxy, currency=currency,
             )
+            # 浏览器 Stripe 输入框已换好 pm_ 时复用它，服务端不再提交卡号
+            pp.external_pm = pm_id
             try:
                 return pp.pay()
             finally:
