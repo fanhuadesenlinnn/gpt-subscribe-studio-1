@@ -704,6 +704,41 @@ class Session {
       'Accept-Language': 'en-US,en;q=0.9',
     });
 
+    // 截获 hCaptcha 解密后的原始图片：它把每张图 drawImage 到挑战 canvas 上。
+    // 这里在「每个新文档」注入拦截器（跨域 iframe 也会执行），
+    // 于是能拿到原始分辨率的 9 张图，不必从 canvas 上切分。
+    await this.page.evaluateOnNewDocument(() => {
+      try {
+        const P = CanvasRenderingContext2D.prototype;
+        if (P.__hcapHooked) return;
+        P.__hcapHooked = true;
+        const orig = P.drawImage;
+        let internal = false;
+        window.__hcapDrawn = [];
+        P.drawImage = function (src) {
+          if (window.__hcapSkip) return orig.apply(this, arguments);
+          if (!internal) {
+            try {
+              const w = src && (src.naturalWidth || src.videoWidth || src.width || 0);
+              const h = src && (src.naturalHeight || src.videoHeight || src.height || 0);
+              if (w >= 32 && h >= 32) {
+                internal = true;
+                const c = document.createElement('canvas');
+                c.width = w;
+                c.height = h;
+                c.getContext('2d').drawImage(src, 0, 0);
+                const url = c.toDataURL('image/jpeg', 0.95);
+                const args = Array.prototype.slice.call(arguments, 1);
+                window.__hcapDrawn.push({ w, h, url, args, t: Date.now() });
+                internal = false;
+              }
+            } catch (e) { internal = false; }
+          }
+          return orig.apply(this, arguments);
+        };
+      } catch (e) {}
+    });
+
     // 反自动化痕迹：webdriver 与插件数组
     // 环境一致性伪装。实测服务器 Chrome 有三处自相矛盾（现已修正 UA）：
     //   UA 与 platform 必须同为 Linux
@@ -1271,6 +1306,71 @@ class Session {
   }
 
   /**
+   * 把拦截到的那张原始合成图按 rows×cols 均分。
+   * 原图是 480×320 的严丝合缝九宫格，均分即可，没有黑边和缝隙。
+   */
+  async splitDrawnIntoTiles(idx = 0, cols = 3, rows = 3) {
+    const cands = this.page.frames().filter((f) => /challenge|newassets/.test(f.url()));
+    for (const f of cands) {
+      try {
+        const r = await f.evaluate(async (opt) => {
+          const d = (window.__hcapDrawn || [])[opt.idx];
+          if (!d) return null;
+          const img = new Image();
+          await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = d.url; });
+          const tw = img.width / opt.cols, th = img.height / opt.rows;
+          const tiles = [];
+          window.__hcapSkip = true;
+          for (let r0 = 0; r0 < opt.rows; r0++) {
+            for (let c0 = 0; c0 < opt.cols; c0++) {
+              const cv = document.createElement('canvas');
+              cv.width = Math.round(tw);
+              cv.height = Math.round(th);
+              cv.getContext('2d').drawImage(img, c0 * tw, r0 * th, tw, th, 0, 0, cv.width, cv.height);
+              tiles.push(cv.toDataURL('image/jpeg', 0.95).split(',').pop());
+            }
+          }
+          window.__hcapSkip = false;
+          return { w: img.width, h: img.height, cols: opt.cols, rows: opt.rows, tiles };
+        }, { idx, cols, rows });
+        if (r && r.tiles && r.tiles.length) return r;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  /**
+   * 取 hCaptcha 通过 drawImage 画到挑战 canvas 上的原始图片。
+   * 这是解密后的原图，尺寸与内容都是原样，不需要切分。
+   */
+  async drawnImages() {
+    const cands = this.page.frames().filter((f) => /challenge|newassets/.test(f.url()));
+    for (const f of cands) {
+      try {
+        const arr = await f.evaluate(() => (window.__hcapDrawn || []).map((d) => ({
+          w: d.w, h: d.h, url: d.url, args: d.args,
+        })));
+        if (!arr || !arr.length) continue;
+        // 按内容去重（保留首次出现顺序），并把 drawImage 的落点解析成 canvas 上的矩形
+        const seen = new Set();
+        const out = [];
+        for (const d of arr) {
+          const key = `${d.w}x${d.h}:${String(d.url).slice(64, 148)}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          let dest = null;
+          const a = Array.isArray(d.args) ? d.args.map(Number) : [];
+          if (a.length >= 8) dest = { x: a[4], y: a[5], w: a[6], h: a[7] };
+          else if (a.length >= 4) dest = { x: a[0], y: a[1], w: a[2], h: a[3] };
+          out.push({ w: d.w, h: d.h, url: d.url, dest });
+        }
+        return out;
+      } catch (_) {}
+    }
+    return [];
+  }
+
+  /**
    * 把挑战 canvas 切成 3×3 的 9 张图，用于 HCaptchaClassification 的九宫格模式。
    * 先按「与面板底色差异」找出真正的图片区域，排除上方黑边与面板留白。
    * 返回每格在 canvas 内的像素框，便于把答案映射回来点击。
@@ -1542,6 +1642,17 @@ class Session {
   }
 
   /** 读取 __reaPending 里保存的结果（超时后 execute 仍可能在跑）。 */
+  /** 轮询等待 token（点完 Next/Verify 后需要时间才回来）。 */
+  async waitToken(timeoutMs = 20000) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      const r = await this.readPendingToken();
+      if (r && r.token && String(r.token).length > 80) return r.token;
+      await sleep(400);
+    }
+    return '';
+  }
+
   async readPendingToken() {
     if (!this.page) return null;
     try {
@@ -1826,21 +1937,22 @@ const server = http.createServer(async (req, res) => {
         if (!cv0 || !cv0.jpg) return { phase: 'error', error: 'no_canvas', question };
         const oneQuery = [String(cv0.jpg).split(',').pop()];
 
-        // 先尝试九宫格切分；背景铺满整张画布时说明不是九宫格
-        let g = null;
-        if (!isDrag) {
-          g = await s.gridTiles().catch(() => null);
-          if (g && g.bbox) {
-            const fullW = (g.bbox.maxX - g.bbox.minX) / g.W;
-            const fullH = (g.bbox.maxY - g.bbox.minY) / g.H;
-            if (fullW > 0.9 && fullH > 0.9) g = null;   // 满幅图，不是九宫格
-          }
-        }
+        // hCaptcha 把解密后的原图 drawImage 到挑战 canvas 上。网格题的原图是
+        // 一张严丝合缝的合成图（实测 480×320），按 3×3 均分即可，不需要切放大后的 canvas。
+        const drawn = await s.drawnImages().catch(() => []);
+        const big = drawn.filter((d) => d.w >= 200 && d.dest)
+          .sort((x, y) => (y.w * y.h) - (x.w * x.h))[0] || null;
 
-        const useGrid = !!g && Array.isArray(g.tiles) && g.tiles.length === 9;
+        const isGridPrompt = /select|click each image|choose|pick all/i.test(question)
+          && !/lines?|shorter|longer|curve/i.test(question);
+        let split = null;
+        if (!isDrag && isGridPrompt && big) {
+          try { split = await s.splitDrawnIntoTiles(0, 3, 3); } catch (e) {}
+        }
+        const useGrid = !!split && Array.isArray(split.tiles) && split.tiles.length === 9;
         const task = {
           type: 'HCaptchaClassification',
-          queries: useGrid ? g.tiles : oneQuery,
+          queries: useGrid ? split.tiles : oneQuery,
         };
         if (question) task.question = question;
         if (anchors.length) task.anchors = anchors;
@@ -1916,7 +2028,7 @@ const server = http.createServer(async (req, res) => {
               await s.page.mouse.up();
               await sleep(900);
               let tok2 = '';
-              try { tok2 = await s.readPendingToken(); } catch (e) {}
+              try { tok2 = await s.waitToken(14000); } catch (e) {}
               const again = await s.captureChallenge().catch(() => null);
               const sub2 = tok2 ? null : await s.submitChallenge().catch(() => null);
               if (!tok2) { try { tok2 = await s.readPendingToken(); } catch (e) {} }
@@ -1945,7 +2057,7 @@ const server = http.createServer(async (req, res) => {
           const dr = await s.dragOnCanvas([st[0] / cv0.w, st[1] / cv0.h],
                                           [en[0] / cv0.w, en[1] / cv0.h]);
           let token = '';
-          try { token = await s.readPendingToken(); } catch (e) {}
+          try { token = await s.waitToken(18000); } catch (e) {}
           return { phase: token ? 'answered' : 'answer_not_accepted', mode, question,
                    drag: { start: st, end: en }, action: dr, token,
                    tokenLen: token ? token.length : 0 };
@@ -1960,9 +2072,12 @@ const server = http.createServer(async (req, res) => {
           } else if (Array.isArray(sol.top_k)) {
             picked = sol.top_k.map(Number).filter((n) => n >= 0 && n < 9);
           }
+          // 合成图的落点矩形 + 3×3 均分 → 每格中心（canvas 像素）→ 归一化
+          const d = big.dest;
           coords = picked.map((i) => {
-            const b = g.boxes[i];
-            return [(b.x + b.w / 2) / g.W, (b.y + b.h / 2) / g.H];
+            const r0 = Math.floor(i / 3), c0 = i % 3;
+            return [(d.x + d.w * (c0 + 0.5) / 3) / cv0.w,
+                    (d.y + d.h * (r0 + 0.5) / 3) / cv0.h];
           });
         } else {
           const bx = Array.isArray(sol.box) ? sol.box.map(Number) : [];
@@ -1976,7 +2091,7 @@ const server = http.createServer(async (req, res) => {
         const ans = await s.answerChallengeAt(coords);
         const sub = await s.submitChallenge();
         let token = '';
-        try { token = await s.readPendingToken(); } catch (e) {}
+        try { token = await s.waitToken(18000); } catch (e) {}
         return {
           phase: token ? 'answered' : 'answer_not_accepted',
           mode,
@@ -1984,7 +2099,9 @@ const server = http.createServer(async (req, res) => {
           picked,
           coords: coords.map((c) => [Math.round(c[0] * 1000) / 1000,
                                      Math.round(c[1] * 1000) / 1000]),
-          bbox: g ? g.bbox : null,
+          bbox: null,
+          source: useGrid ? 'drawn-split' : 'canvas',
+          gridImage: split ? { w: split.w, h: split.h } : null,
           solution: sol,
           answer: ans,
           submit: sub,
@@ -2123,6 +2240,22 @@ const server = http.createServer(async (req, res) => {
             }
           }
         } catch (e) {}
+        let drawnMeta = [];
+        try {
+          const dr = await s.drawnImages();
+          drawnMeta = dr.map((d) => ({ w: d.w, h: d.h, len: d.url ? d.url.length : 0, dest: d.dest }));
+          if (dr.length) {
+            try { require('fs').writeFileSync('/opt/gss/data/drawn_meta.json',
+              JSON.stringify(drawnMeta)); } catch (e5) {}
+            // 落盘前 12 张原图，便于人工核对
+            dr.slice(0, 12).forEach((d, i) => {
+              try {
+                require('fs').writeFileSync(`/opt/gss/data/drawn_${i}.jpg`,
+                  Buffer.from(String(d.url).split(',').pop(), 'base64'));
+              } catch (e6) {}
+            });
+          }
+        } catch (e) {}
         const slim = ch ? {
           prompt: ch.prompt, header: ch.header,
           vw: ch.vw, vh: ch.vh, dpr: ch.dpr,
@@ -2132,7 +2265,8 @@ const server = http.createServer(async (req, res) => {
             len: c.dataUrl ? c.dataUrl.length : 0, err: c.err })),
           frameUrl: ch.frameUrl,
         } : null;
-        return { phase: 'challenge', capture: slim, shotLen: shot ? shot.length : 0, shot };
+        return { phase: 'challenge', capture: slim, drawn: drawnMeta,
+                 shotLen: shot ? shot.length : 0, shot };
       });
       return send(200, out);
     } catch (e) {
