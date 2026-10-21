@@ -157,7 +157,6 @@ class StripeProtocol:
         self.order_factory = None  # 可选：返回新 checkout_url 的 callable
         self._captcha_client: httpx.Client | None = None
         # solver 会话：passive 与 challenge 必须同一浏览器 + 同一出口 IP
-        self._solver_ua = ""
         self._email_cache = ""
         # 由浏览器 Stripe 输入框产出的 pm_：给定时跳过服务端 tokenize。
         # 卡数据经过 Stripe iframe（真实用户路径），hCaptcha/Radar 判定更宽松。
@@ -846,6 +845,7 @@ class StripeProtocol:
           +213.7s confirm
         """
         fp = self.register_fingerprint()
+        abandoned = False
 
         # 精简时间线（与成功案例一致）
         self._sleep(random.uniform(2.0, 4.0))
@@ -891,6 +891,7 @@ class StripeProtocol:
             pi = body.get("payment_intent") or {}
             log(f"⑦b 命中 challenge（第 {round_no + 1} 次）site_key={str(sj.get('site_key'))[:8]}")
             log("   纯协议模式：不出浏览器、不调打码，直接放弃本单")
+            abandoned = True
             ch = None
             if not (ch and sj.get("verification_url")):
                 break
@@ -911,9 +912,11 @@ class StripeProtocol:
                 confirm_res = v
             break
 
-        self._solver_close_session()
         outcome = self.classify(confirm_res, None)
-        if outcome.state not in ("paid", "card_declined", "captcha_rejected"):
+        # 纯协议放弃的单子不必轮询：状态不会自己变成拒卡
+        if abandoned:
+            log("   已放弃，跳过轮询")
+        elif outcome.state not in ("paid", "card_declined", "captcha_rejected"):
             polled = self.poll(cs_id)
             outcome = self.classify(confirm_res, polled)
         log(f"判定 {outcome.state} decline={outcome.decline_code} code={outcome.code}")
