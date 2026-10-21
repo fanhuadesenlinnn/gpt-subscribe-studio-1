@@ -389,6 +389,10 @@ class PlusProtocol:
                 msg = str(err.get("message") or f"Stripe HTTP {http_status}")
                 out.code = code or out.code
                 out.decline_code = decline or out.decline_code
+                # 402 的错误体里没有 PaymentIntent 状态；
+                # 不能沿用第 ④ 步 ChatGPT 的 submission status（那是 "success"，
+                # 只表示「确认请求被接受」，不是扣款结果）。
+                out.intent_status = str(final.get("status") or "") or None
                 out.raw["final"] = final
                 if http_status == 402 or code == "card_declined" or decline:
                     out.state = "card_declined"
