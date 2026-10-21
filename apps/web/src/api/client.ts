@@ -29,6 +29,8 @@ export interface Order {
   promo_campaign_id?: string | null;
   price_interval?: string | null;
   confirm_return_url?: string | null;
+  /** 从 accessToken 解析出的账户邮箱 */
+  session_email?: string | null;
 }
 
 const jsonHeaders = { "Content-Type": "application/json" };

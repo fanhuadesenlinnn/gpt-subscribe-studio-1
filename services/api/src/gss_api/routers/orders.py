@@ -32,7 +32,11 @@ from gss_core.stripe_protocol import StripeProtocol, PaymentOutcome
 from gss_core.proxies import align_proxy_region, configured_proxy, session_proxy
 from gss_core.redaction import redact_sensitive
 from gss_core.chatgpt import ChatGPTClient, clamp_team_seats
-from gss_core.session_token import parse_session_bundle
+from gss_core.session_token import (
+    email_from_access_token,
+    parse_session,
+    parse_session_bundle,
+)
 from gss_core.vault import OrderSecrets, vault
 from gss_orchestrator.pipeline import apply_payment_result, assert_deliverable
 from gss_payment.adapter import hosted_payment_result
@@ -76,6 +80,15 @@ def _to_out(order: Order) -> OrderOut:
             expires_at=view.subscription.expires_at.isoformat() if view.subscription.expires_at else None,
             channel=view.subscription.channel,
         )
+    # 账户邮箱：从 vault 里的 accessToken 现解一次，失败留空由前端兜底
+    session_email = ""
+    try:
+        _sec = vault.get(order.id)
+        if _sec and _sec.session:
+            session_email = email_from_access_token(parse_session(_sec.session))
+    except Exception:
+        session_email = ""
+
     return OrderOut(
         id=order.id,
         status=str(order.status),
@@ -104,6 +117,7 @@ def _to_out(order: Order) -> OrderOut:
         promo_campaign_id=view.promo_campaign_id,
         price_interval=view.price_interval,
         confirm_return_url=view.confirm_return_url,
+        session_email=session_email or None,
     )
 
 

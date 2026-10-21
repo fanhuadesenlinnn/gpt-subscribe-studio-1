@@ -146,3 +146,54 @@ def _parse_cookie_header(text: str) -> Dict[str, str]:
 
 
 __all__ = ["SessionBundle", "parse_session", "parse_session_bundle"]
+
+def email_from_access_token(access_token: str) -> str:
+    """从 ChatGPT accessToken（JWT）里取账户邮箱。
+
+    载荷里邮箱出现的位置不止一处，按以下顺序尝试：
+      · "email"
+      · "https://api.openai.com/profile" → "email"   ← 实测位置
+      · "https://api.openai.com/auth" → "email"
+      · "user" → "email"
+    解析失败一律返回空串，由调用方决定兜底。
+    """
+    import base64
+    import json
+
+    token = (access_token or "").strip()
+    parts = token.split(".")
+    if len(parts) < 2:
+        return ""
+    payload = parts[1].replace("-", "+").replace("_", "/")
+    payload += "=" * (-len(payload) % 4)
+    try:
+        data = json.loads(base64.b64decode(payload).decode("utf-8", "replace"))
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+
+    def _ok(value: Any) -> str:
+        text = str(value or "").strip()
+        return text if "@" in text and "." in text.split("@")[-1] else ""
+
+    direct = _ok(data.get("email"))
+    if direct:
+        return direct
+    # 实测 ChatGPT accessToken 的邮箱在这里
+    profile = data.get("https://api.openai.com/profile")
+    if isinstance(profile, dict):
+        found = _ok(profile.get("email"))
+        if found:
+            return found
+    auth = data.get("https://api.openai.com/auth")
+    if isinstance(auth, dict):
+        found = _ok(auth.get("email"))
+        if found:
+            return found
+    user = data.get("user")
+    if isinstance(user, dict):
+        found = _ok(user.get("email"))
+        if found:
+            return found
+    return ""

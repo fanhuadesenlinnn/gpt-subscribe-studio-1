@@ -95,6 +95,8 @@ class OrderOut(BaseModel):
     promo_campaign_id: Optional[str] = None
     price_interval: Optional[str] = None
     confirm_return_url: Optional[str] = None
+    # 从 accessToken(JWT) 解析出的账户邮箱，用于前端预填账单邮箱
+    session_email: Optional[str] = None
 
 
 class ErrorOut(BaseModel):

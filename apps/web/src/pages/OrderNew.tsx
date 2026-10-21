@@ -471,6 +471,7 @@ export function OrderNew({ onRecord }: Props) {
           {step === 1 && order && payMode === "protocol" && (
             <ProtocolPayPanel
               orderId={order.id}
+              sessionEmail={order.session_email}
               country={order.billing_country || country}
               amount={order.amount}
               currency={order.currency}

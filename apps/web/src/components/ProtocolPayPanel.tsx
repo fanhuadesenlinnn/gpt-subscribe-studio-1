@@ -19,7 +19,7 @@ import { useState } from "react";
 import { CheckoutLinkCard } from "./CheckoutLinkCard";
 
 import { formatAmount, payProtocol, type BillingInput, type ProtocolPayResult } from "../api/client";
-import { FIXED_TAX_FREE_BILLING, FIXED_TAX_FREE_BILLING_LABEL } from "../card-payment/billingExamples";
+import { randomBillingExample } from "../card-payment/billingExamples";
 
 interface Props {
   orderId: string;
@@ -34,6 +34,8 @@ interface Props {
   /** Stripe 公钥；有它才能挂载 Stripe 输入框 */
   publishableKey?: string | null;
   checkoutUrl?: string | null;
+  /** 从 accessToken 解析出的账户邮箱，用于预填账单邮箱 */
+  sessionEmail?: string | null;
   disabled?: boolean;
   onDone?: (result: ProtocolPayResult) => void;
   /** 重新向 Stripe 读一次金额（报价超时会用） */
@@ -109,17 +111,21 @@ const STEPS = [
 ];
 
 export function ProtocolPayPanel({
-  orderId, country, amount, currency, quotationError, exitLabel,
+  orderId, country, amount, currency, quotationError, exitLabel, sessionEmail,
   checkoutUrl, disabled, onDone, onRefreshQuote,
 }: Props) {
   const [card, setCard] = useState<CardDraft>(EMPTY_CARD);
-  // 账单地址钉死在美国免税州：税额恒定 → 会话总额不变 →
-  // confirm 的 expected_amount 不会因地址变动而对不上。
-  const [billing, setBilling] = useState<BillingInput>(() => ({
-    email: "",
-    name: "",
-    ...FIXED_TAX_FREE_BILLING,
-  }));
+  // 账单地址在五个免税州里随机生成（避免每次同一地址）；
+  // 邮箱优先用 accessToken 里解析出的账户邮箱。
+  const [billing, setBilling] = useState<BillingInput>(() => {
+    const base: BillingInput = {
+      email: (sessionEmail ?? "").trim(),
+      name: "",
+      line1: "", city: "", state: "", postal_code: "",
+      country: country || "US",
+    };
+    return randomBillingExample(base);
+  });
   const [proxy, setProxy] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -247,7 +253,8 @@ export function ProtocolPayPanel({
             <Badge variant="light">US / {billing.state}</Badge>
           </Group>
           <Text size="xs" c="dimmed">
-            {FIXED_TAX_FREE_BILLING_LABEL}。全州无销售税，应付金额不会因地址改动而变动。
+            默认从五个免税州（AK / DE / MT / NH / OR）随机生成，可手动修改。
+            邮箱取自 accessToken 解析结果，会作为 Stripe 收据地址。
           </Text>
           {country && country.toUpperCase() !== "US" && (
             <Alert color="orange" variant="light" icon={<IconAlertCircle size={16} />}>
@@ -259,11 +266,11 @@ export function ProtocolPayPanel({
             <TextInput label="持卡人姓名" value={billing.name} onChange={changeBilling("name")} disabled={busy} />
             <TextInput label="邮箱" value={billing.email ?? ""} onChange={changeBilling("email")} disabled={busy} />
           </SimpleGrid>
-          <TextInput label="街道地址" value={billing.line1} readOnly disabled />
+          <TextInput label="街道地址" value={billing.line1} onChange={changeBilling("line1")} disabled={busy} />
           <SimpleGrid cols={{ base: 1, xs: 3 }}>
-            <TextInput label="城市" value={billing.city} readOnly disabled />
-            <TextInput label="州 / 省" value={billing.state} readOnly disabled />
-            <TextInput label="邮编" value={billing.postal_code} readOnly disabled />
+            <TextInput label="城市" value={billing.city} onChange={changeBilling("city")} disabled={busy} />
+            <TextInput label="州 / 省" value={billing.state} onChange={changeBilling("state")} disabled={busy} />
+            <TextInput label="邮编" value={billing.postal_code} onChange={changeBilling("postal_code")} disabled={busy} />
           </SimpleGrid>
         </Stack>
       </Paper>
