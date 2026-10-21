@@ -1580,7 +1580,7 @@ window.__reaSolve = function(sk, rq, tmo) {
 
 ```
 providers.json 中的 grok <PAY_HOST>
-  base   https://api.<PAY_HOST>/v1
+  base   https://api.<YOUR_DOMAIN>/v1
   model  grok-4.7
   key    <API_KEY>...
 验证    ✅ 文本请求返回 OK
@@ -1669,7 +1669,7 @@ Output JSON ONLY, no prose:
 ```python
 # /tmp/vs3.py
 ask(png, prompt, sysmsg="Output valid JSON only. No explanations.")
-  → grok-4.7 via https://api.<PAY_HOST>/v1/chat/completions
+  → grok-4.7 via https://api.<YOUR_DOMAIN>/v1/chat/completions
   → 返回 JSON
 
 # 流程
@@ -1720,7 +1720,7 @@ A 更简单，且模型已证明能正确识别线条位置。
 tools/hcaptcha-solver/vision_server.py
   POST /solve        线条题：canvas PNG → 归一化坐标
   POST /solve-grid   9 宫格：整屏截图 → 格子索引
-  模型 grok-4.7 @ https://api.<PAY_HOST>/v1
+  模型 grok-4.7 @ https://api.<YOUR_DOMAIN>/v1
 ```
 
 服务器侧以 systemd 单元 `gss-vision` 运行，监听 127.0.0.1:8300。

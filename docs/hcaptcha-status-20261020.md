@@ -156,7 +156,7 @@ Origin: https://js.stripe.com
 | `gss-solver.service` | 127.0.0.1:8199 + 127.0.0.1:8443 | ORIGIN_MODE=merchant |
 | `gss-api.service` | 127.0.0.1:18120 | uvicorn，非容器 |
 | `gss-window.service` | — | 轮转调度器（3 分钟一轮） |
-| `caddy` | :80 / :443 | <PAY_HOST> → 18120 |
+| `caddy` | :80 / :443 | <YOUR_ORIGIN> → 18120 |
 
 ## 五、下一轮要试的
 

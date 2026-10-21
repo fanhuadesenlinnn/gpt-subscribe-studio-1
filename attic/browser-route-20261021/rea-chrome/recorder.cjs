@@ -42,7 +42,7 @@ async function pickPage() {
   const pages = all.filter((t) => t.type === 'page');
   const want = arg('target');
   if (want) return pages.find((t) => (t.url || '').includes(want)) || pages[0];
-  // 优先 <PAY_HOST> / pay.openai.com
+  // 优先 <YOUR_ORIGIN> / pay.openai.com
   return pages.find((t) => /pay\.(<PAY_HOST>\.shop|openai\.com)/.test(t.url || '')) || pages[0];
 }
 

@@ -320,7 +320,7 @@ A: 50 个测试通过意味着：
 | `GSS_CONFIG_DIR` | 配置目录，线上是 `/opt/gss/config`（放 `container-auth.json`、`proxy-gateways.json`） |
 | `GSS_AUTH_FILE` | 登录口令文件路径 |
 | `GSS_WEB_DIR` | 前端构建产物目录，线上是 `/opt/gss/app/web` |
-| `GSS_PUBLIC_ORIGIN` | 你的域名，例如 `https://<PAY_HOST>`。不填时按「请求 Origin 与 Host 同源」校验 |
+| `GSS_PUBLIC_ORIGIN` | 你的域名，例如 `https://<YOUR_ORIGIN>`。不填时按「请求 Origin 与 Host 同源」校验 |
 | `HCAPTCHA_SOLVER_URL` | solver 地址，默认 `http://127.0.0.1:8199` |
 
 ---

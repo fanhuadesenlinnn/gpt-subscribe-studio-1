@@ -19,9 +19,11 @@ from gss_core.proxies import configured_proxy, align_proxy_region
 
 STRIPE = "https://api.stripe.com"
 API = "http://127.0.0.1:18120"
-ORIGIN = "https://<PAY_HOST>"
-PK = ("pk_live_51HOrSwC6h1nxGoI3lTAgRjYVrz4dU3fVOabyCcKR3pbEJguCVAlq"
-      "CxdxCUvoRh1XWwRacViovU3kLKvpkjh7IqkW00iXQsjo3n")
+ORIGIN = "https://<YOUR_ORIGIN>"
+PK = (
+    "pk_live_51HOrSwC6h1nxGoI3lTAgRjYVrz4dU3fVOabyCcKR3pbEJguCVAlqCxdxC"
+    "UvoRh1XWwRacViovU3kLKvpkjh7IqkW00iXQsjo3n"
+)
 V = "2020-08-27;custom_checkout_beta=v1"
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36")

@@ -128,7 +128,7 @@ WantedBy=multi-user.target
 ## 反向代理（Caddy）
 
 ```caddyfile
-<PAY_HOST> {
+<YOUR_ORIGIN> {
     encode gzip zstd
     reverse_proxy 127.0.0.1:18120 {
         header_up -Authorization
