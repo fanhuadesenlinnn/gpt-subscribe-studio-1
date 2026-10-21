@@ -2569,3 +2569,117 @@ systemctl edit gss-solver
 
 **本轮已验证**：仅「指纹自洽化」（不装 RoxyBrowser）就让 passive 从 14–25s 提速到 13.1–13.6s。
 说明 hCaptcha 确实在读这些信号，指纹内核补齐后应有进一步改善。
+
+## 二十九、YesCaptcha 官方接口规格（2026-10-15 核对）
+
+来源：`https://docs.yescaptcha.com/zh/tasks/hcaptcha/` 与
+`https://docs.yescaptcha.com/zh/tasks/hcaptcha-classification/`，
+结构化规格见 `https://docs.yescaptcha.com/openapi.json`。
+
+### 29.1 两种路线，价格与适用场景
+
+| 任务类型 | 价格 | 返回 | 说明 |
+|---|---|---|---|
+| `HCaptchaTaskProxyless` | 30 点（0.03 元） | token | 打码商自家 IP |
+| `HCaptchaTaskProxylessM1` | 30 点 | token | 另一线路，可互为备用 |
+| `HCaptchaTask` | 15 点（0.015 元） | token | 走我们的代理 |
+| `HCaptchaClassification` | **8 点（0.008 元）** | 点击位置 | **不返回 token**，同步 |
+
+「识别失败、超时自动退点」；分类题「结果为空时不扣点」。
+
+### 29.2 参数易错点（本轮踩过的坑）
+
+| 字段 | 正确写法 | 错误写法 | 后果 |
+|---|---|---|---|
+| 代理用户名 | `proxyLogin` | `proxyUserName` | 认证没传过去，`ERROR_PROXY_READ_TIMEOUT` |
+| `websiteURL` | 用户看到验证码的页面<br>`https://pay.openai.com/c/pay/{cs}` | 验证码厂商域名<br>`b.stripecdn.com/...HCaptcha.html` | token 被判无效 |
+| `userAgent` | `GET /useragent` 返回的纯文本 | 自己拼的 UA | 同上 |
+| 企业版字段 | 不需要 `isEnterprise` | 传 `isEnterprise` | schema 里没有这个字段 |
+| 提交时 | 用结果里返回的 `userAgent` | 用自己原来的 UA | 同上 |
+
+`GET https://api.yescaptcha.com/useragent` —— 纯文本返回，不需要 clientKey，不扣点，每次启动取一次。
+
+### 29.3 实测结论：`HCaptchaTask` 拿的 token 过不了 Stripe 二次挑战
+
+两次正确参数的实测（2026-10-21）：
+
+```
+proxied   (15 点) → token 5111，verify 200，但
+                    last_payment_error.code = payment_intent_authentication_failure
+                    message = "Captcha challenge failed."
+
+proxyless (30 点) → token 5419，verify 200，同样失败
+```
+
+两次都是 `websiteURL` 正确、`userAgent` 用的是官方值、`rqdata` 传了真实 264 字符。
+说明**不是参数问题，而是 token 的会话绑定问题**：Stripe 的
+`intent_confirmation_challenge` 要求 token 在**它自己发起的那次 hCaptcha 会话**里签发，
+第三方代解拿到的 token 即使 sitekey/host/rqdata 全对也不被接受。
+
+这与第二十四～二十八节的协议层结论一致（`getcaptcha` 密文会话绑定，重放 415）。
+
+另：`captcha_response_key` **不是** Stripe 合法字段，会返回
+`parameter_unknown: Received unknown parameter: captcha_response_key`。
+verify_challenge 只接受 `challenge_response_token`。
+
+### 29.4 因此唯一可行路线：`HCaptchaClassification` + 我们自己点
+
+token 必须在我们自己的浏览器会话里签发，所以只能由我们渲染、我们点。
+`HCaptchaClassification` 只负责「该点哪里」，正好补上我们缺的一环。
+
+#### 九宫格
+
+```json
+POST /createTask
+{"clientKey":"...","task":{
+  "type":"HCaptchaClassification",
+  "question":"Please click each image containing a bicycle",
+  "queries":["<base64 图1>","<base64 图2>","... 共 9 张，按网页顺序"]
+}}
+→ solution: {"objects":[true,false,false,true,true,false,true,true,false],
+             "top_k":[0,3,4,6,7]}
+```
+
+`objects` 与 `top_k` 等价：前者是每张图是否为目标的布尔数组，后者是命中序号（**从 0 开始**）。
+直接喂给已有的 `answerChallenge(indices)`。
+
+#### 点击指定位置（线条题等）
+
+```json
+{"type":"HCaptchaClassification","question":"<网页原句>",
+ "queries":["<一张大图的 base64，最好是 canvas 导出的 JPG>"],
+ "anchors":["<右上角示例小图的 base64>"]}
+→ solution: {"box":["221","213"]}          // 多个目标时依次 x1,y1,x2,y2,...
+```
+
+**坐标换算（必须做）**：
+
+```
+网页上的 x = 返回的 x × canvas 显示宽度 ÷ 上传图片宽度
+网页上的 y = 返回的 y × canvas 显示高度 ÷ 上传图片高度
+```
+
+`queries` 只能放**大图本身**：能给 canvas 导出的原图最好，否则截图只截大图区域，不多不少。
+本轮第一次实测把整屏截图（含题干栏和底部按钮）当成 queries 发送，
+返回的第二个点落在图片下方空白处 —— 就是因为混进了非题目区域。
+
+#### 拖动到指定位置（拖拽题）
+
+```json
+{"type":"HCaptchaClassification","question":"Drag the correct animal into its matching outline",
+ "queries":["<一张同时包含「小块」和「目标位置」的截图>"]}
+→ solution: {"type":"drag","box":[{"start":[644,218],"end":[239,315]}]}
+```
+
+图片任意一边不小于 260 像素；有多个小块时逐个拖动。
+
+#### 示例小图（anchors）
+
+题目右上角有示例小图的（`Select the items that go in the same room as the reference object`、
+`Tap on the item that travels in the same area as the example`），
+**必须**把那张小图放进 `anchors`，否则识别不了。这也是本机视觉方案此前
+让模型直接看整图的根本缺陷 —— 示例图与九宫格挤在一张图里，模型分不清哪个是参照物。
+
+### 29.5 点击失败可以退点
+
+点击后验证失败的，1 小时内用 `report` 上报，约 24 小时后结算返点。

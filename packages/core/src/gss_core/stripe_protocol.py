@@ -699,10 +699,12 @@ class StripeProtocol:
         website = (
             "https://b.stripecdn.com/stripethirdparty-srv/assets/v35.5/HCaptchaInvisible.html"
         )
+        # 字段名以 https://docs.yescaptcha.com/openapi.json 为准：
+        #   · hCaptcha 只接受顶层 rqdata；enterprisePayload 是 reCAPTCHA 的字段
+        #   · isEnterprise 在 schema 里不存在，传了也会被忽略
         task: dict[str, Any] = {
             "websiteURL": website,
             "websiteKey": site_key,
-            "isEnterprise": True,
             "userAgent": UA,
         }
         if use_proxy and self.proxy:
@@ -718,7 +720,7 @@ class StripeProtocol:
         else:
             task["type"] = "HCaptchaTaskProxyless"
         if rqdata:
-            task["enterprisePayload"] = {"rqdata": rqdata}
+            task["rqdata"] = rqdata
 
         cc = self._captcha_http()
         try:

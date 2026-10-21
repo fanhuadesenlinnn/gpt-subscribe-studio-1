@@ -14,6 +14,7 @@ No card data or session credentials pass through the solver.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any, Dict, Optional
 
@@ -187,7 +188,11 @@ def verify_challenge(
         "key": publishable_key,
         "_stripe_version": api_version,
     }
-    if ekey:
+    # Stripe 的 verify_challenge 不接受 captcha_response_key：
+    #   实测返回 400 parameter_unknown: Received unknown parameter.
+    # 逐字段免费探测过 guid/muid/sid/eid/challenge_response_key 等 10 个候选，
+    # 全部 parameter_unknown —— 请求体只需要 challenge_response_token。
+    if ekey and os.environ.get("GSS_SEND_CAPTCHA_KEY") == "1":
         body["captcha_response_key"] = ekey
     # HAR: verify_challenge is posted by Stripe.js, so its Origin is js.stripe.com —
     # unlike init/confirm/poll which post from pay.openai.com.
