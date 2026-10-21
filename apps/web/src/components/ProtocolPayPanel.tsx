@@ -7,7 +7,6 @@ import {
   Paper,
   PasswordInput,
   SimpleGrid,
-  Radio,
   Stack,
   Text,
   Textarea,
@@ -17,7 +16,6 @@ import {
 import { IconAlertCircle, IconCheck, IconClock, IconX } from "@tabler/icons-react";
 import { useState } from "react";
 
-import { StripeCardFields, type StripeCardHandle } from "../card-payment/CardFields";
 import { CheckoutLinkCard } from "./CheckoutLinkCard";
 
 import { formatAmount, payProtocol, type BillingInput, type ProtocolPayResult } from "../api/client";
@@ -42,7 +40,6 @@ interface Props {
   onRefreshQuote?: () => Promise<void> | void;
 }
 
-type PmMode = "server" | "stripe";
 
 interface CardDraft {
   number: string;
@@ -103,52 +100,16 @@ function describe(result: ProtocolPayResult) {
   }
 }
 
-/** 两张可选的模式卡片：选中带边框与勾选，和 Mantine 的 Radio.Card 一致。 */
-function ModeCard({
-  value, pmMode, busy, title, hint, detail,
-}: {
-  value: PmMode;
-  pmMode: PmMode;
-  busy: boolean;
-  title: string;
-  hint: string;
-  detail: string;
-}) {
-  const active = pmMode === value;
-  return (
-    <Radio.Card value={value} radius="md" p="md" disabled={busy}
-      style={{
-        borderColor: active ? "var(--mantine-color-blue-6)" : undefined,
-        borderWidth: active ? 2 : 1,
-        background: active ? "var(--mantine-color-blue-0)" : undefined,
-      }}>
-      <Group wrap="nowrap" align="flex-start" gap="xs">
-        <Radio.Indicator mt={2} />
-        <div>
-          <Group gap={6} wrap="nowrap">
-            <Text fw={600} size="sm">{title}</Text>
-            {active && <Badge size="xs" variant="filled">已选</Badge>}
-          </Group>
-          <Text size="xs" c="dimmed" mt={2}>{hint}</Text>
-          <Text size="xs" c="dimmed" mt={6}>{detail}</Text>
-        </div>
-      </Group>
-    </Radio.Card>
-  );
-}
-
 const STEPS = [
   { title: "指纹注册", description: "m.stripe.com/6 × 4 → guid/muid/sid" },
   { title: "init", description: "取金额、hCaptcha sitekey 与 rqdata" },
   { title: "elements / 地址", description: "elements/sessions + tax_region" },
-  { title: "hCaptcha", description: "passive token（本地 solver 会话）" },
-  { title: "payment_methods", description: "服务端向 Stripe 提交卡号，换 pm_" },
   { title: "confirm", description: "402 拒卡 / 200 challenge / 成功" },
   { title: "poll", description: "轮询终态" },
 ];
 
 export function ProtocolPayPanel({
-  orderId, country, amount, currency, quotationError, exitLabel, publishableKey,
+  orderId, country, amount, currency, quotationError, exitLabel,
   checkoutUrl, disabled, onDone, onRefreshQuote,
 }: Props) {
   const [card, setCard] = useState<CardDraft>(EMPTY_CARD);
@@ -161,9 +122,6 @@ export function ProtocolPayPanel({
   });
   const [proxy, setProxy] = useState("");
   const [busy, setBusy] = useState(false);
-  // 取 pm_ 的方式：server = 服务端提交卡号；stripe = 浏览器 Stripe 输入框
-  const [pmMode, setPmMode] = useState<PmMode>("stripe");
-  const [stripeCard, setStripeCard] = useState<StripeCardHandle | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ProtocolPayResult | null>(null);
 
@@ -179,59 +137,32 @@ export function ProtocolPayPanel({
     if (!billing.name.trim() || !billing.line1.trim() || !billing.city.trim() || !billing.postal_code.trim()) {
       return setError("账单地址要填全：姓名、街道、城市、邮编。");
     }
+    if (!(billing.email ?? "").trim()) {
+      return setError("邮箱必须填写：Stripe 会把收据发到这个地址，缺失会影响风控判定。");
+    }
+    if (billing.country === "US" || billing.country === "CA") {
+      if (!billing.state.trim()) return setError(`${billing.country} 账单地址必须填州/省。`);
+    }
 
     const payloadBilling = { ...billing, country: (billing.country || "US").toUpperCase() };
 
-    // 分支一：服务端提交卡号
-    if (pmMode === "server") {
-      const number = card.number.replace(/[\s-]/g, "");
-      if (!/^\d{12,19}$/.test(number)) return setError("卡号格式不对（12–19 位数字）。");
-      if (!/^\d{3,4}$/.test(card.cvc)) return setError("CVC 格式不对（3–4 位）。");
-      if (!/^\d{1,2}$/.test(card.exp_month)) return setError("到期月份填 MM。");
-      if (!/^\d{2}$|^\d{4}$/.test(card.exp_year)) return setError("到期年份填 YY 或 YYYY。");
+    const number = card.number.replace(/[\s-]/g, "");
+    if (!/^\d{12,19}$/.test(number)) return setError("卡号格式不对（12–19 位数字）。");
+    if (!/^\d{3,4}$/.test(card.cvc)) return setError("CVC 格式不对（3–4 位）。");
+    if (!/^\d{1,2}$/.test(card.exp_month)) return setError("到期月份填 MM。");
+    if (!/^\d{2}$|^\d{4}$/.test(card.exp_year)) return setError("到期年份填 YY 或 YYYY。");
 
-      setBusy(true);
-      try {
-        const out = await payProtocol(orderId, {
-          card: { number, cvc: card.cvc, exp_month: card.exp_month, exp_year: card.exp_year },
-          billing: payloadBilling,
-          proxy: proxy.trim() || undefined,
-        });
-        setResult(out);
-        onDone?.(out);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "协议支付失败");
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
-
-    // 分支二：浏览器 Stripe 输入框产 pm_，其余仍走协议
-    if (!stripeCard) {
-      return setError("Stripe 输入框还没准备好，请等几秒或刷新金额再试。");
-    }
     setBusy(true);
     try {
-      // 卡数据只进入 Stripe iframe，本站服务端拿不到
-      const pmId = await stripeCard.tokenize({
-        name: payloadBilling.name,
-        email: payloadBilling.email || undefined,
-        line1: payloadBilling.line1,
-        city: payloadBilling.city,
-        state: payloadBilling.state,
-        postal_code: payloadBilling.postal_code,
-        country: payloadBilling.country,
-      });
       const out = await payProtocol(orderId, {
-        payment_method_id: pmId,
+        card: { number, cvc: card.cvc, exp_month: card.exp_month, exp_year: card.exp_year },
         billing: payloadBilling,
         proxy: proxy.trim() || undefined,
       });
       setResult(out);
       onDone?.(out);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Stripe 输入框支付失败");
+      setError(err instanceof Error ? err.message : "协议支付失败");
     } finally {
       setBusy(false);
     }
@@ -287,61 +218,25 @@ export function ProtocolPayPanel({
 
       <CheckoutLinkCard url={checkoutUrl} />
 
-      <Alert color="blue" variant="light" icon={<IconAlertCircle size={18} />} title="协议链路（两种取 pm_ 的方式）">
-        无论选哪种，Stripe 侧都是服务端按真实浏览器时序跑完：
+      <Alert color="blue" variant="light" icon={<IconAlertCircle size={18} />} title="协议链路">
+        服务端按真实浏览器时序跑完：
         指纹注册 → init → elements/sessions → tax_region → hCaptcha → confirm → poll。
-        两种方式只差在「卡号从哪进入 Stripe」，耗时约 60–180 秒，中途别关页面。
+        卡号只在本次请求里使用，不落库、不打日志。耗时约 60–180 秒，中途别关页面。
       </Alert>
 
       <Paper withBorder p="md" radius="md">
         <Stack gap="sm">
-          <Text fw={600}>卡号怎么提交</Text>
-          <Radio.Group value={pmMode} onChange={(value) => setPmMode(value as PmMode)}>
-            <SimpleGrid cols={{ base: 1, xs: 2 }} spacing="sm">
-              <ModeCard value="stripe" pmMode={pmMode} busy={busy}
-                title="Stripe 输入框"
-                hint="iframe 内输卡，最接近真人"
-                detail="卡号只进入 Stripe 的 iframe，浏览器直接换 pm_。指纹、Radar 信号与真实用户一致。" />
-              <ModeCard value="server" pmMode={pmMode} busy={busy}
-                title="纯协议提交"
-                hint="服务端直连，无需 iframe"
-                detail="卡号发到本服务，由服务端调 Stripe 换 pm_。可批量、无人值守。" />
+            <TextInput label="卡号" value={card.number} onChange={changeCard("number")}
+              inputMode="numeric" autoComplete="off" disabled={busy} placeholder="4242424242424242" />
+            <SimpleGrid cols={{ base: 1, xs: 3 }}>
+              <TextInput label="到期月份" placeholder="MM" value={card.exp_month}
+                onChange={changeCard("exp_month")} inputMode="numeric" maxLength={2} disabled={busy} />
+              <TextInput label="到期年份" placeholder="YYYY" value={card.exp_year}
+                onChange={changeCard("exp_year")} inputMode="numeric" maxLength={4} disabled={busy} />
+              <PasswordInput label="CVC" value={card.cvc} onChange={changeCard("cvc")}
+                inputMode="numeric" maxLength={4} disabled={busy} />
             </SimpleGrid>
-          </Radio.Group>
 
-          {pmMode === "stripe" ? (
-            <>
-              {publishableKey ? (
-                <StripeCardFields
-                  publishableKey={publishableKey}
-                  amount={amount}
-                  currency={currency}
-                  checkoutUrl={checkoutUrl}
-                  requirePaymentMethod
-                  disabled={busy}
-                  onReady={setStripeCard}
-                />
-              ) : (
-                <Alert color="orange" variant="light" icon={<IconAlertCircle size={16} />}>
-                  这个订单没有 publishable_key，挂不了 Stripe 输入框。
-                  请回第 1 步重建结账，或改用「纯协议提交」。
-                </Alert>
-              )}
-            </>
-          ) : (
-            <>
-              <TextInput label="卡号" value={card.number} onChange={changeCard("number")}
-                inputMode="numeric" autoComplete="off" disabled={busy} placeholder="4242424242424242" />
-              <SimpleGrid cols={{ base: 1, xs: 3 }}>
-                <TextInput label="到期月份" placeholder="MM" value={card.exp_month}
-                  onChange={changeCard("exp_month")} inputMode="numeric" maxLength={2} disabled={busy} />
-                <TextInput label="到期年份" placeholder="YYYY" value={card.exp_year}
-                  onChange={changeCard("exp_year")} inputMode="numeric" maxLength={4} disabled={busy} />
-                <PasswordInput label="CVC" value={card.cvc} onChange={changeCard("cvc")}
-                  inputMode="numeric" maxLength={4} disabled={busy} />
-              </SimpleGrid>
-            </>
-          )}
         </Stack>
       </Paper>
 
@@ -388,16 +283,10 @@ export function ProtocolPayPanel({
         <Button
           size="md"
           loading={busy}
-          disabled={disabled || busy || !price || (pmMode === "stripe" && !stripeCard)}
+          disabled={disabled || busy || !price}
           onClick={() => void run()}
         >
-          {busy
-            ? (pmMode === "stripe" ? "提交中…" : "协议支付中…")
-            : !price
-              ? "等待报价"
-              : pmMode === "stripe" && !stripeCard
-                ? "Stripe 输入框加载中…"
-                : `确认支付 ${price}`}
+          {busy ? "协议支付中…" : !price ? "等待报价" : `确认支付 ${price}`}
         </Button>
       </Group>
 

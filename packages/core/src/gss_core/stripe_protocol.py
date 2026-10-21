@@ -552,10 +552,18 @@ class StripeProtocol:
         log(f"   → {r.status_code}")
         if r.status_code == 200:
             try:
-                newest = (r.json() or {}).get("config_id")
+                body = r.json() or {}
+                newest = body.get("config_id")
                 if newest:
                     ctx.config_id = newest
                     log(f"   config_id 更新为 {ctx.config_id[:12]}")
+                # 关键：提交 tax_region 后 Stripe 会按国家重算税额，总额可能变化。
+                # confirm 的 expected_amount 必须等于会话当前总额，否则返回
+                # checkout_amount_mismatch（CA/GB 等有消费税的国家必现）。
+                due = (body.get("total_summary") or {}).get("due")
+                if due is not None and str(due) != str(ctx.amount):
+                    log(f"   金额随税额更新 {ctx.amount} → {due}")
+                    ctx.amount = str(due)
             except Exception:
                 pass
         else:
