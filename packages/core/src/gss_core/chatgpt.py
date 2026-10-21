@@ -947,13 +947,28 @@ class ChatGPTClient:
             raise DomainError(ErrorCode.PAYMENT_DECLINED, redact_sensitive(text))
         return payload
 
-    def create_confirmation_token(self, *, publishable_key: str, payment_method: str) -> str:
+    def create_confirmation_token(
+        self,
+        *,
+        publishable_key: str,
+        payment_method: str,
+        setup_future_usage: Optional[str] = "off_session",
+    ) -> str:
+        """创建 confirmation token。
+
+        ``setup_future_usage`` 必须与确认时的 ``save_payment_method_for_reuse``
+        配对，否则上游返回 ``Card save choice does not match confirmation token``：
+
+            off_session + true     表示保存卡片
+            None        + 不带该字段  表示不保存
+        """
         body = {
             "key": publishable_key,
             "payment_method": payment_method,
-            "setup_future_usage": "off_session",
             "_stripe_version": STRIPE_API_VERSION,
         }
+        if setup_future_usage:
+            body["setup_future_usage"] = setup_future_usage
         response = self.stripe_http.post(
             f"{STRIPE_BASE}/v1/confirmation_tokens",
             data=urlencode(body),
@@ -1026,6 +1041,7 @@ class ChatGPTClient:
         processor_entity: str = "",
         currency: str = "",
         publishable_key: str = "",
+        save_choice: Optional[bool] = None,
     ) -> Dict[str, Any]:
         session_id = public_checkout_id(checkout_session_id)
         page_url = checkout_url or f"{APP_BASE}/checkout/{session_id}"
@@ -1048,6 +1064,7 @@ class ChatGPTClient:
                 expected_amount=tax_minor,
                 billing=billing,
                 currency=currency,
+                save_choice=save_choice,
             )
         confirm_body: Dict[str, Any] = {
             "checkout_session_id": session_id,
@@ -1055,6 +1072,10 @@ class ChatGPTClient:
             "confirm_token": confirm_token,
             "selected_payment_method_type": "card",
         }
+        # 会话若声明了 saved_payment_link_initial_save_for_reuse，
+        # 保存选择必须与 ctoken 的 setup_future_usage 一致，且上游按字符串解析。
+        if save_choice is not None:
+            confirm_body["save_payment_method_for_reuse"] = "true" if save_choice else "false"
 
         def _post_confirm() -> Any:
             return self.http.post(
@@ -1065,15 +1086,27 @@ class ChatGPTClient:
             )
 
         response = _post_confirm()
-        # 带优惠活动等会话要求新卡显式保存选择（官方前端抓包带 save_payment_method_for_reuse）；
-        # 普通会话带这个字段反而会被拒，所以只在上游明确要求时补发一次。
+        # 会话可能要求新卡显式给出保存选择（官方前端抓包带 save_payment_method_for_reuse）。
+        # 上游有两种措辞：
+        #   new_card_save_choice_required  —— 缺字段
+        #   Card save choice does not match —— 值不对
+        # 普通会话带这个字段反而会被拒，所以只在上游明确要求时补发。
         # 400 校验失败发生在扣款之前，重发是安全的。
-        if int(getattr(response, "status_code", 0) or 0) == 400 and "new_card_save_choice_required" in str(
-            getattr(response, "text", "") or ""
-        ):
-            logger.info("checkout_confirm 要求保存选择，补带 save_payment_method_for_reuse 重试")
-            confirm_body["save_payment_method_for_reuse"] = True
-            response = _post_confirm()
+        def _needs_save_choice(resp: Any) -> bool:
+            if int(getattr(resp, "status_code", 0) or 0) != 400:
+                return False
+            text = str(getattr(resp, "text", "") or "").lower()
+            return "save_choice" in text or "save choice" in text
+
+        if _needs_save_choice(response):
+            for choice in (True, False):
+                logger.info(
+                    "checkout_confirm 要求保存选择，save_payment_method_for_reuse=%s 重试", choice
+                )
+                confirm_body["save_payment_method_for_reuse"] = "true" if choice else "false"
+                response = _post_confirm()
+                if not _needs_save_choice(response):
+                    break
         if int(getattr(response, "status_code", 0) or 0) >= 400:
             self._raise(ErrorCode.PAYMENT_UNKNOWN_STATE, response, "确认结账")
         payload = _json(response)
@@ -1108,8 +1141,13 @@ class ChatGPTClient:
         expected_amount: Optional[int] = None,
         billing: Optional[Dict[str, str]] = None,
         currency: str = "",
+        save_choice: Optional[bool] = None,
     ) -> Dict[str, Any]:
-        """cs_live：文档 4.2 Hosted/Custom Checkout（init → tax_region → elements → confirm）。"""
+        """cs_live：文档 4.2 Hosted/Custom Checkout（init → tax_region → elements → confirm）。
+
+        ``save_choice``：会话要求显式保存选择时传 True/False；
+        None 表示不带该字段（默认行为）。
+        """
         session_id = public_checkout_id(checkout_session_id)
         pk = str(publishable_key or "").strip()
         token = str(confirmation_token or "").strip()
@@ -1182,6 +1220,11 @@ class ChatGPTClient:
                 stripe_js_id=stripe_js_id,
                 elements_session_id=elements_session_id,
                 locale=locale,
+            ),
+            **(
+                {"save_payment_method_for_reuse": "true" if save_choice else "false"}
+                if save_choice is not None
+                else {}
             ),
         }
         if elements_config_id:

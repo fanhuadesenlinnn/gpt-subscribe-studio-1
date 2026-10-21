@@ -56,11 +56,11 @@ Plus / Go / Pro 家族走的是 custom checkout，链路不同，见「支持的
 
 | 档位 | 代码 | 挂牌价 | 结账类型 | 会话 id | 支付入口 |
 |---|---|---|---|---|---|
-| Plus | `plus` | $20 / 月 | custom | `oaics_` | `/pay` 编排管线 |
-| Go | `go` | $8 / 月 | custom | `oaics_` | `/pay` |
-| Pro Lite | `pro_lite` | $100 / 月 | custom | `oaics_` | `/pay` |
-| Pro | `pro` | $200 / 月 | custom | `oaics_` | `/pay` |
-| Pro Max | `pro_max` | $500 / 月 | custom | `oaics_` | `/pay` |
+| Plus | `plus` | $20 / 月 | custom | `oaics_` / `cs_live_` | **`/pay-protocol` 纯协议** |
+| Go | `go` | $8 / 月 | custom | `oaics_` / `cs_live_` | **`/pay-protocol` 纯协议** |
+| Pro Lite | `pro_lite` | $100 / 月 | custom | `oaics_` / `cs_live_` | **`/pay-protocol` 纯协议** |
+| Pro | `pro` | $200 / 月 | custom | `oaics_` / `cs_live_` | **`/pay-protocol` 纯协议** |
+| Pro Max | `pro_max` | $500 / 月 | custom | `oaics_` / `cs_live_` | **`/pay-protocol` 纯协议** |
 | Team | `team` | $25 / 席 / 月 | hosted | `cs_live_` | **`/pay-protocol` 纯协议** |
 
 ### Plus 家族（custom checkout）
@@ -96,19 +96,40 @@ US PH CL EG JP GB TR BR MX IN ID VN TH MY SG KR AU CA DE NL PL AR SA AE ZA
 
 每个地区绑定币种，建单时决定结账币种。完整表在 `packages/core/src/gss_core/countries.py`。
 
-### 当前实现状态
+### 实现状态
 
-纯协议链路（`/pay-protocol`）只覆盖 **Team**。它从结账地址里取 `cs_live_`，
-而 Plus 家族的地址里是 `oaics_`，取不到 —— 对 Plus 订单调用会返回：
+两族都走 `/pay-protocol`，服务端按订单的 `checkout_kind` 自动分流：
 
 ```
-502 checkout_upstream_error
-URL 里没有 cs_live_: https://chatgpt.com/checkout/oaics_…
+checkout_kind = hosted  → StripeProtocol   （Team，payment_pages/{cs}/confirm）
+checkout_kind = custom  → PlusProtocol     （Plus 家族，ChatGPT confirm + PaymentIntent）
 ```
 
-Plus 家族目前只有 `/pay` 编排管线这一条路，它依赖浏览器产出的 `ctoken_`。
-浏览器路线归档后，Web 界面上 Plus 家族没有可用的支付入口 —— 这一条列在
-「未解决的问题」里。
+Plus 家族的会话 id 有两种形态，两种都支持：
+
+- `oaics_…` —— ChatGPT 内部结账会话
+- `cs_live_…` —— Stripe Custom Checkout 会话（此时额外走一次 finalize 取 PaymentIntent）
+
+### Plus 的协议链路
+
+```
+① mint_sentinel                    挂 openai-sentinel-token / -so-token
+② POST /v1/payment_methods         卡号 → pm_（带 allow_redisplay=always）
+③ POST /v1/confirmation_tokens     pm_  → ctoken_
+④ POST /backend-api/payments/checkout/confirm
+④b finalize_stripe_custom_checkout 仅 cs_ 会话，取 PaymentIntent
+⑤ POST /v1/payment_intents/{id}/confirm
+⑥ 判定：拒卡 / 成功 / 需 3DS / 命中 hCaptcha
+```
+
+两个容易踩的点：
+
+- **保存选择必须配对**：ctoken 的 `setup_future_usage` 与 confirm 的
+  `save_payment_method_for_reuse` 不一致时，上游返回
+  `Card save choice does not match confirmation token`。
+  代码按 `(None, None)` → `(off_session, true)` → `(on_session, true)` 依次尝试。
+- **pm 要声明 `allow_redisplay=always`**：订阅需要保存卡片复用，不声明时
+  即使保存选择配对也会被拒。
 
 
 ---
@@ -172,12 +193,24 @@ Plus 家族目前只有 `/pay` 编排管线这一条路，它依赖浏览器产�
 按请求计的挑战率是另一个口径：这 12 张卡在反复重试中累计 36 次 confirm，
 其中约 94% 命中挑战。两个数字都对，分母不同。
 
+### Plus 家族批量实测（4 张卡）
+
+| 卡 | 结果 | 原因 |
+|---|---|---|
+| `<CARD>` | `card_declined` | `generic_decline` |
+| `<CARD>` | `card_declined` | `generic_decline` |
+| `<CARD>` | `card_declined` | `generic_decline` |
+| `<CARD>` | `card_declined` | ChatGPT 侧确认 failed |
+
+**4 / 4 拿到拒卡。** 单次耗时约 14 秒（含两次 ctoken 与 Stripe intent 确认）。
+
 ### 耗时
 
 | 项目 | 数值 |
 |---|---|
-| 默认精简链路 | **7 秒** |
-| 全环节打开 | 35 秒 |
+| Team 默认精简链路 | **7 秒** |
+| Team 全环节打开 | 35 秒 |
+| Plus 家族（custom 链） | 约 14 秒 |
 
 ### 两个 hCaptcha sitekey
 
@@ -497,15 +530,11 @@ confirm 请求里带一个 `rv_timestamp`：**212 字符**，字符集 43 个符
 缺：前端在提交前后拿到的是两个不同来源的金额（报价 vs init），
 金额变化时是否要中断并要求刷新报价，还没定。
 
-**7. Plus 家族在 Web 界面上没有支付入口**
+**7. Plus 家族的 hCaptcha 与 3DS 分支覆盖不足**
 
-已知：Plus / Go / Pro 家族的结账是 custom 类型（`oaics_`），
-支付要 `ctoken_`（Stripe Elements 在浏览器产出）走 `/pay` 编排管线；
-而纯协议端点只认 `cs_live_`，对 Plus 订单直接返回 502。
-缺：一个不依赖浏览器的 Plus 支付路径 —— 后端已有
-`create_confirmation_token(publishable_key, payment_method=pm_)`
-可以把服务端造的 `pm_` 换成 `ctoken_`，但没有接到文案与界面里，
-也没有端到端跑通过。
+已知：custom 流同样会弹 `intent_confirmation_challenge`（实测 4 张卡里 1 张），
+且 `requires_action` 时纯协议无法完成。
+缺：挑战命中率样本量太小（4 张），还不足以判断 Plus 与 Team 的挑战率是否相同。
 
 ---
 

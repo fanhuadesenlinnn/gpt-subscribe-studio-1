@@ -1,5 +1,9 @@
 # Plus 走协议模式的实施计划
 
+> **状态（2026-10-21）：已实现并验证。** 阶段 1–3 完成，
+> Plus 家族走 `/pay-protocol` 的 custom 分支，4 张卡实测 4/4 拿到拒卡。
+> 实施中发现的三个关键点见文末「实施记录」。
+
 目标：让 Plus / Go / Pro 家族也能像 Team 一样，不发浏览器、不调打码，纯服务端跑完支付。
 
 ---
@@ -154,3 +158,62 @@ publishable_key: Optional[str] = Field(default=None, max_length=120)
 
 阶段 1 是**决策点**：如果 Stripe 不接受服务端造的 `pm_`，整条路要改走
 「服务端用 Stripe.js 等价签名」或「保留浏览器产 ctoken」，届时再评估。
+
+---
+
+## 7. 实施记录（2026-10-21）
+
+### 结果
+
+4 张卡全部拿到拒卡：
+
+```
+[A] <CARD>  card_declined  generic_decline
+[B] <CARD>  card_declined  generic_decline
+[C] <CARD>  card_declined  generic_decline
+[D] <CARD>  card_declined  ChatGPT 侧确认 failed
+```
+
+单次约 14 秒。
+
+### 计划外的三个发现
+
+**1. Plus 的会话 id 有两种形态**
+
+计划里假设 Plus 一定是 `oaics_`。实测同一账号连续建单，
+返回过 `oaics_…` 也返回过 `cs_live_…`（都在 `chatgpt.com/checkout/…` 下）。
+所以分流不能看 URL 前缀，要看订单的 `checkout_kind`：
+
+```python
+is_custom_checkout = view.checkout_kind == "custom"
+```
+
+`cs_` 形态还需要多走一次 `finalize_stripe_custom_checkout` 才拿到 PaymentIntent。
+
+**2. ctoken 的 `setup_future_usage` 与 confirm 的保存选择必须配对**
+
+上游报 `Card save choice does not match confirmation token`。
+代码按三组依次尝试：
+
+```
+(None,        None)   ← ChatGPT 侧接受这种
+(off_session, true)
+(on_session,  true)
+```
+
+**3. pm 必须声明 `allow_redisplay=always`**
+
+这一条最隐蔽：即使保存选择配对，订阅场景下仍会被拒。
+加上之后 B 卡从「保存选择不匹配」变成正常拒卡。
+
+**4. intent 确认要用单独的 ctoken**
+
+ChatGPT 侧接受不带 `setup_future_usage` 的 token，但 Stripe 的
+`payment_intents/confirm` 要求带 `off_session`，否则报
+`The setup_future_usage value on the ConfirmationToken you provided was null`。
+所以第 ⑤ 步单独造一个 ctoken。
+
+### 未覆盖
+
+- 3DS：`requires_action` 时纯协议无法完成，标记 `challenge_required`
+- hCaptcha：custom 流同样会弹（4 张里 1 张），样本量不足以对比两族命中率
