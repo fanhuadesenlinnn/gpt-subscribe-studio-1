@@ -25,6 +25,9 @@ credentials/
 deploy/.env
 .env
 .env.local
+cards.env
+*.cards.env
+.env.*
 config.json
 proxy.json
 runtime.json
