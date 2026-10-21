@@ -33,10 +33,39 @@ def mask(n: str) -> str:
     return n[:6] + "****" + n[-4:] if len(n) >= 10 else n
 
 
+def load_pool(path: str) -> list[dict]:
+    """卡池文件格式：卡号|MM/YYYY|CVC||||国家（国家列忽略，账单统一用 US）。"""
+    cards = []
+    for line in Path(path).read_text().splitlines():
+        line = line.strip()
+        if not line or "|" not in line or line.startswith("#"):
+            continue
+        parts = line.split("|")
+        if len(parts) < 3 or not parts[0].strip().isdigit():
+            continue
+        mm, _, yy = parts[1].partition("/")
+        cards.append({
+            "tag": str(len(cards) + 1),
+            "number": parts[0].strip(),
+            "exp_month": mm.strip(),
+            "exp_year": yy.strip(),
+            "cvc": parts[2].strip(),
+        })
+    return cards
+
+
 def main() -> None:
     auth = json.loads(Path("/opt/gss/config/container-auth.json").read_text())
     env = load_env("/opt/gss/app/cards.env")
     ats = json.load(open("/opt/gss/data/at_list.json"))
+
+    # 有参数就按卡池文件跑，否则用 cards.env 的 A–D 四张
+    if len(sys.argv) > 1:
+        cards = load_pool(sys.argv[1])
+        print(f"卡池: {sys.argv[1]}  {len(cards)} 张")
+        print()
+        run_cards(cards, auth, ats)
+        return
 
     cards = []
     for tag in ("A", "B", "C", "D"):
@@ -48,6 +77,10 @@ def main() -> None:
                 "exp_year": env.get(f"CARD_{tag}_EXP_YEAR", ""),
                 "cvc": env.get(f"CARD_{tag}_CVC", ""),
             })
+    run_cards(cards, auth, ats)
+
+
+def run_cards(cards: list[dict], auth: dict, ats: list) -> None:
     print(f"卡片数: {len(cards)}")
     print()
 

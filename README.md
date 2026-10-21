@@ -220,23 +220,22 @@ API 层通过二选一的字段区分：
 按请求计的挑战率是另一个口径：这 12 张卡在反复重试中累计 36 次 confirm，
 其中约 94% 命中挑战。两个数字都对，分母不同。
 
-### Plus 家族批量实测（4 张卡）
+### Plus 家族批量实测（18 张卡池）
 
-| 卡 | 结果 | 原因 |
+全部走 `plan=plus`、账单地址 US、标准模式：
+
+| 结果 | 张数 | 说明 |
 |---|---|---|
-| `<CARD>` | `card_declined` | `generic_decline` |
-| `<CARD>` | `card_declined` | `generic_decline` |
-| `<CARD>` | `card_declined` | `generic_decline` |
-| `<CARD>` | `card_declined` | ChatGPT 侧确认 failed |
+| **拒卡** | **18 / 18** | 全部拿到 `card_declined` |
+| ├ `fraudulent` | 13 | 发卡行判定风险交易 |
+| ├ `generic_decline` | 1 | 发卡行未说明原因 |
+| └ ChatGPT 侧拒绝 | 4 | 未到发卡行，无 Stripe 拒卡码 |
 
-**4 / 4 拿到拒卡。** 单次耗时约 14 秒（含两次 ctoken 与 Stripe intent 确认）。
+**拒卡率 100%。** 单次约 14 秒。
 
-Pro（$200/月）单独验证过，走同一条 custom 链路：
-
-```
-plan=pro  amount=200.00 USD  kind=custom
-→ card_declined / generic_decline
-```
+拒卡码的分布有信息量：13 张落在 `fraudulent`，说明这套卡在 Plus（$20/月）
+这个价位上基本都被发卡行直接判风险，与是否过挑战无关 —— 纯协议链路
+不需要通过 hCaptcha 就能拿到这个结论。
 
 ### 代理出口的两个坑
 

@@ -850,8 +850,12 @@ async def pay_order_protocol(order_id: str, payload: ProtocolPayRequest) -> Prot
     settings = load_settings()
     captcha_key = getattr(settings, "captcha_api_key", "") or ""
     captcha_url = getattr(settings, "captcha_api_url", "https://api.yescaptcha.com")
-    proxy = payload.proxy or align_proxy_region(
-        configured_proxy("checkout"), payload.billing.country
+    # 出口按「用户选择的账单地区」自动对齐，并且每次支付用新的 SID：
+    # 复用配置里固定的 SID 会一直撞同一个出口 IP，抽到坏 IP 时整单必挂。
+    proxy = (
+        payload.proxy
+        or session_proxy("checkout", payload.billing.country)
+        or align_proxy_region(configured_proxy("checkout"), payload.billing.country)
     )
 
     secrets = vault.get(order_id)
