@@ -1582,7 +1582,7 @@ window.__reaSolve = function(sk, rq, tmo) {
 providers.json 中的 <PROVIDER_ALIAS>
   base   https://api.<PAY_HOST>/v1
   model  grok-4.7
-  key    <API_KEY>...
+  key    <API_KEY>
 验证    ✅ 文本请求返回 OK
 ```
 
