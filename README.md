@@ -18,6 +18,8 @@
 - [目录结构](#目录结构)
 - [本地开发](#本地开发)
 - [已知行为](#已知行为)
+- [hCaptcha 探索记录](#hcaptcha-探索记录)
+- [未解决的问题](#未解决的问题)
 - [仓库安全](#仓库安全)
 - [归档](#归档)
 
@@ -288,15 +290,128 @@ printf '卡号|月/年|CVC||||US\n' | /opt/gss/app/.venv/bin/python /opt/gss/scr
 
 ## 已知行为
 
-**挑战不可绕过。** 命中 `intent_confirmation_challenge` 的唯一出路是丢弃本单重试，
-或用真实浏览器会话求解 —— 后者已归档，见下一节。实测调整下列任一项都不降低命中率：
-TLS 指纹、UA、`rv_timestamp`、passive token、指纹注册、elements 会话、停留时长、
-tax_region、出口国家与 ISP。
+**挑战不可绕过。** 命中 `intent_confirmation_challenge` 时这一单就结束了，
+只能丢弃重试。已排除的变量清单与实测过程见「hCaptcha 探索记录」，
+还没弄清的部分见「未解决的问题」。
 
 **金额可能随税额变化。** 勾选 `tax_region` 后 Stripe 会按账单国家重算总额，
 后端会同步刷新 `expected_amount`。落在免税州时不会发生。
 
 **Node 是运行期依赖。** 见「快速开始」。
+
+---
+
+## hCaptcha 探索记录
+
+这一节只写有实测支撑的结论。完整过程见
+[docs/exploration-log-browser-route.md](./docs/exploration-log-browser-route.md)
+与 [docs/hcaptcha-direct-solve.md](./docs/hcaptcha-direct-solve.md)。
+
+### 两个 sitekey，性质完全不同
+
+| sitekey | 来源 | 形态 | 纯协议下的处理 |
+|---|---|---|---|
+| `24ed0064-62cf-4d42-9960-5dd1a41d4e29` | init 响应的 `link_settings.hcaptcha_site_key` | passive（invisible），多数情况直接放行 | 跳过，不提交 token |
+| `c7faac4c-1cd7-4b1b-b2d4-42ba98d09c7a` | confirm 响应的 `next_action.use_stripe_sdk.stripe_js.site_key` | `intent_confirmation_challenge`，几乎必然是图片任务 | 命中即放弃本单 |
+
+`c7faac4c` 的挑战**每次都是九宫格或拖拽**，没有出现过 invisible 直接通过的样本。
+
+### 试过的路径与结果
+
+| 路线 | 做法 | 结果 |
+|---|---|---|
+| 第三方打码（无代理） | YesCaptcha `HCaptchaTaskProxyless` | 拿得到 token，但提交给 Stripe 不认 |
+| 第三方打码（带代理） | YesCaptcha `HCaptchaTask` + 同出口 | 同上，仍不认 |
+| 同步分类 | YesCaptcha `HCaptchaClassification` | 能识别图片坐标，但对推进支付无帮助 |
+| 无头 Chrome 求解 | 自己驱动 challenge iframe | 上下文评分过低，token 被拒 |
+| Camoufox 求解 | 真实 Firefox + 指纹修补 | `mediump 23/127/127`（Chrome 只有 `10/15/15`），仍不保证通过 |
+| 手工题面切分 | 对 canvas 截图按九宫格切 | 切不准，因为截的是放大品 |
+| 直接放弃 | 命中即结束本单 | **当前采用** |
+
+### 关键发现一：挑战令牌与会话绑定
+
+挑战令牌必须在**持有该次 `rqdata` 的同一会话**里签出。跨会话、跨 IP、跨浏览器拿到的
+token 提交上去一律无效。这条直接判了第三方打码的死刑 —— 不是打码质量不够，
+而是结构性不可能：解题进程不在那个会话里。
+
+### 关键发现二：canvas 上是放大品，原图在 `drawImage`
+
+自己截图切九宫格一直切不准，原因是 canvas 是 1000×940 的**放大品**，上方还有约 240px 黑边。
+拦截 `CanvasRenderingContext2D.prototype.drawImage` 后拿到了真正送进 canvas 的位图：
+
+```
+网格题    1 张 480×320 合成图（3 行 3 列，严丝合缝无缝隙）
+拖拽题    1 张 480×320 背景 + 2 张 85×85 可拖小块
+```
+
+所以正确的切法是按 3×3 均分 480×320，而不是对着放大后的 canvas 量坐标。
+
+### 关键发现三：`rv_timestamp` 生成不出来
+
+confirm 请求里带一个 `rv_timestamp`：**212 字符**，字符集 43 个符号
+（`` #$&;<=>?CDLMNOPQRTUXY[\]^_`bdenoqrstuvwxyz{ ``）。
+
+抓了 605 条 HAR 记录里加载的**全部 131 个 JS 文件**：
+
+- 只有 `checkout-app-init` 与 `controller` 两个 bundle 出现这个字段，且都只是透传
+- 按字符集反查：**0 个文件命中**
+- 按「长度 212 附近 + `Math.random` / `fromCharCode` 组合」反查：**0 个文件命中**
+- init 响应里也不返回这个值
+
+结论：生成逻辑不在客户端加载的代码里，很可能是服务端下发或 WASM 内部产物。
+
+### YesCaptcha 接口踩过的坑
+
+| 现象 | 原因 |
+|---|---|
+| `ERROR_PROXY_READ_TIMEOUT` | 代理字段名写成了 `proxyUserName`，正确是 `proxyLogin` |
+| 报未知参数 | 没有 `isEnterprise` 字段；`rqdata` 是顶层字段，不在 `task` 里 |
+| 空结果也扣费 | 用 `HCaptchaClassification` 时，返回空结果不扣点 |
+| 计费差异 | `HCaptchaTask` 15 点（带代理）/ `HCaptchaTaskProxyless` 30 点 |
+
+这轮探索在打码上花了约 309 点，其中约 60 点浪费在字段名写错和空探测上。
+
+---
+
+## 未解决的问题
+
+按影响排序，每条都写了「已知」与「缺什么」。
+
+**1. 挑战率降不下来（约 94%，36 次 confirm 统计）**
+
+已知：逐个调整 TLS 指纹、UA、`rv_timestamp`、passive token、指纹注册、elements 会话、
+停留时长、tax_region、出口国家与 ISP，命中率都不变。
+缺：Stripe 判定 `intent_confirmation_challenge` 的实际特征是什么。
+目前只能观测到「有些卡的 BIN 直接 402 拒卡、不弹挑战」，但触发差异的原因没有解释。
+
+**2. `rv_timestamp` 生成算法未知**
+
+已知：长度 212、43 字符集、客户端只做透传、服务端不返回。
+缺：生成函数本体，或它参与风控的权重。
+
+**3. 挑战令牌的会话绑定机制只到现象层**
+
+已知：必须同 `rqdata` 同会话，跨会话无效。
+缺：绑定的是 cookie、TLS 会话、还是 hCaptcha 内部的 `ekey` 链路。逆向清楚之前，
+任何「外部求解后回填」的方案都无法论证可行性。
+
+**4. 通过挑战之后的路径没走通过**
+
+已知：挑战后应当进入 3DS 或直接成功。
+缺：真实通过样本。所有纯协议样本都在 confirm 阶段终止，
+所以 `verify_challenge` → `poll` → 订阅生效这一段只有代码路径，没有端到端实证。
+
+**5. 免税州地址与非 US 出口的组合未验证**
+
+已知：账单地址默认从美国五个免税州里随机生成，出口按账单国家对齐。
+缺：如果业务上需要跑其他国家（JP/GB 等），地址该用什么、税额如何稳定，
+没有实测数据。目前的做法是在界面上给出提示。
+
+**6. 金额随税额变化时，前后端展示可能不一致**
+
+已知：勾选 `tax_region` 后后端会同步刷新 `expected_amount`。
+缺：前端在提交前后拿到的是两个不同来源的金额（报价 vs init），
+金额变化时是否要中断并要求刷新报价，还没定。
 
 ---
 
