@@ -121,3 +121,22 @@ export function randomBillingExample(current: BillingInput, rng: () => number = 
 export function billingExampleError(): string | null {
   return null;
 }
+
+/**
+ * 固定的美国免税州账单地址（俄勒冈州波特兰，全州无销售税）。
+ *
+ * 为什么固定：Stripe 会在提交 tax_region 后按账单国家/州重算税额。
+ * 地址每变一次，会话总额就变一次，而 confirm 的 expected_amount 必须
+ * 等于会话当前总额，否则返回 checkout_amount_mismatch。
+ * 钉死在免税州可以让总额恒定，也让同一张卡的重复测试可比。
+ */
+export const FIXED_TAX_FREE_BILLING = {
+  country: "US",
+  state: "OR",
+  city: "Portland",
+  postal_code: "97211",
+  line1: "1 Fixture St",
+} as const;
+
+/** 固定地址的一句说明，给界面用。 */
+export const FIXED_TAX_FREE_BILLING_LABEL = "美国免税州固定地址：OR / Portland 97211";

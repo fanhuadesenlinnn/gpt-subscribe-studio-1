@@ -19,7 +19,7 @@ import { useState } from "react";
 import { CheckoutLinkCard } from "./CheckoutLinkCard";
 
 import { formatAmount, payProtocol, type BillingInput, type ProtocolPayResult } from "../api/client";
-import { randomBillingExample } from "../card-payment/billingExamples";
+import { FIXED_TAX_FREE_BILLING, FIXED_TAX_FREE_BILLING_LABEL } from "../card-payment/billingExamples";
 
 interface Props {
   orderId: string;
@@ -113,13 +113,13 @@ export function ProtocolPayPanel({
   checkoutUrl, disabled, onDone, onRefreshQuote,
 }: Props) {
   const [card, setCard] = useState<CardDraft>(EMPTY_CARD);
-  const [billing, setBilling] = useState<BillingInput>(() => {
-    const base: BillingInput = {
-      email: "", name: "", line1: "", city: "", state: "", postal_code: "",
-      country: country || "US",
-    };
-    return randomBillingExample(base);
-  });
+  // 账单地址钉死在美国免税州：税额恒定 → 会话总额不变 →
+  // confirm 的 expected_amount 不会因地址变动而对不上。
+  const [billing, setBilling] = useState<BillingInput>(() => ({
+    email: "",
+    name: "",
+    ...FIXED_TAX_FREE_BILLING,
+  }));
   const [proxy, setProxy] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -244,20 +244,26 @@ export function ProtocolPayPanel({
         <Stack gap="sm">
           <Group justify="space-between">
             <Text fw={600}>账单地址</Text>
-            <Badge variant="light">{billing.country || "US"}</Badge>
+            <Badge variant="light">US / {billing.state}</Badge>
           </Group>
           <Text size="xs" c="dimmed">
-            账单国家必须和订单地区一致，否则 Stripe 会要求补验证。
+            {FIXED_TAX_FREE_BILLING_LABEL}。全州无销售税，应付金额不会因地址改动而变动。
           </Text>
+          {country && country.toUpperCase() !== "US" && (
+            <Alert color="orange" variant="light" icon={<IconAlertCircle size={16} />}>
+              订单地区是 {country.toUpperCase()}，但账单地址固定为美国免税州。
+              出口会按账单国家对齐到 US。要跑其他国家请新建订单时选择对应地区。
+            </Alert>
+          )}
           <SimpleGrid cols={{ base: 1, xs: 2 }}>
             <TextInput label="持卡人姓名" value={billing.name} onChange={changeBilling("name")} disabled={busy} />
             <TextInput label="邮箱" value={billing.email ?? ""} onChange={changeBilling("email")} disabled={busy} />
           </SimpleGrid>
-          <TextInput label="街道地址" value={billing.line1} onChange={changeBilling("line1")} disabled={busy} />
+          <TextInput label="街道地址" value={billing.line1} readOnly disabled />
           <SimpleGrid cols={{ base: 1, xs: 3 }}>
-            <TextInput label="城市" value={billing.city} onChange={changeBilling("city")} disabled={busy} />
-            <TextInput label="州 / 省" value={billing.state} onChange={changeBilling("state")} disabled={busy} />
-            <TextInput label="邮编" value={billing.postal_code} onChange={changeBilling("postal_code")} disabled={busy} />
+            <TextInput label="城市" value={billing.city} readOnly disabled />
+            <TextInput label="州 / 省" value={billing.state} readOnly disabled />
+            <TextInput label="邮编" value={billing.postal_code} readOnly disabled />
           </SimpleGrid>
         </Stack>
       </Paper>
