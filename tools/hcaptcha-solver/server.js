@@ -729,7 +729,16 @@ class Session {
                 c.getContext('2d').drawImage(src, 0, 0);
                 const url = c.toDataURL('image/jpeg', 0.95);
                 const args = Array.prototype.slice.call(arguments, 1);
-                window.__hcapDrawn.push({ w, h, url, args, t: Date.now() });
+                let cw = 0, chh = 0, vis = false;
+                try {
+                  const own = this.canvas;
+                  if (own) {
+                    cw = own.width | 0;
+                    chh = own.height | 0;
+                    vis = !!own.isConnected && own.getBoundingClientRect().width > 0;
+                  }
+                } catch (eOwn) {}
+                window.__hcapDrawn.push({ w, h, url, args, t: Date.now(), cw, chh, vis });
                 internal = false;
               }
             } catch (e) { internal = false; }
@@ -1349,20 +1358,35 @@ class Session {
       try {
         const arr = await f.evaluate(() => (window.__hcapDrawn || []).map((d) => ({
           w: d.w, h: d.h, url: d.url, args: d.args,
+          cw: d.cw, chh: d.chh, vis: d.vis,
         })));
         if (!arr || !arr.length) continue;
         // 按内容去重（保留首次出现顺序），并把 drawImage 的落点解析成 canvas 上的矩形
         const seen = new Set();
         const out = [];
+        const idxOf = new Map();
         for (const d of arr) {
           const key = `${d.w}x${d.h}:${String(d.url).slice(64, 148)}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          let dest = null;
           const a = Array.isArray(d.args) ? d.args.map(Number) : [];
+          let dest = null;
           if (a.length >= 8) dest = { x: a[4], y: a[5], w: a[6], h: a[7] };
           else if (a.length >= 4) dest = { x: a[0], y: a[1], w: a[2], h: a[3] };
-          out.push({ w: d.w, h: d.h, url: d.url, dest });
+          const goodCanvas = !!d.vis && d.cw >= 600 && d.chh >= 600;
+          if (idxOf.has(key)) {
+            const j = idxOf.get(key);
+            // 优先采用「可见的大画布」上的最后一次落点，离屏小画布的坐标不能用来点击
+            if (dest && goodCanvas) {
+              out[j].dest = dest;
+              out[j].onVisibleCanvas = true;
+            } else if (dest && !out[j].dest) {
+              out[j].dest = dest;
+            }
+            out[j].draws = (out[j].draws || 1) + 1;
+            continue;
+          }
+          idxOf.set(key, out.length);
+          out.push({ w: d.w, h: d.h, url: d.url, dest,
+                     onVisibleCanvas: !!(dest && goodCanvas), draws: 1 });
         }
         return out;
       } catch (_) {}
@@ -2011,6 +2035,25 @@ const server = http.createServer(async (req, res) => {
         if (question) task.question = question;
         if (anchors.length) task.anchors = anchors;
 
+        // 落盘实际发送的题图，供人工核对「服务商答错」还是「我们索引错位」
+        try {
+          const fs = require('fs');
+          const qs = Array.isArray(task.queries) ? task.queries : [];
+          qs.forEach((q, i) => {
+            try { fs.writeFileSync(`/opt/gss/data/q_last_${i}.jpg`, Buffer.from(q, 'base64')); } catch (e) {}
+          });
+          const as = Array.isArray(task.anchors) ? task.anchors : [];
+          as.forEach((a, i) => {
+            try { fs.writeFileSync(`/opt/gss/data/a_last_${i}.jpg`, Buffer.from(a, 'base64')); } catch (e) {}
+          });
+          fs.writeFileSync('/opt/gss/data/q_last_meta.json', JSON.stringify({
+            question, queries: qs.length, anchors: as.length,
+            gridImage: split ? { w: split.w, h: split.h } : null,
+            dest: big ? big.dest : null,
+            canvas: { w: cv0.w, h: cv0.h },
+          }));
+        } catch (e) {}
+
         let sol = null;
         try {
           const cr = await fetch(`${CAPTCHA_URL}/createTask`, {
@@ -2025,6 +2068,8 @@ const server = http.createServer(async (req, res) => {
                      question, mode: useGrid ? 'grid' : (isDrag ? 'drag' : 'click') };
           }
           sol = cj.solution || null;
+          try { require('fs').writeFileSync('/opt/gss/data/sol_last.json',
+            JSON.stringify(cj, null, 1)); } catch (e) {}
         } catch (e) {
           return { phase: 'error', error: 'classify_failed', desc: String(e).slice(0, 140), question };
         }
@@ -2308,6 +2353,13 @@ const server = http.createServer(async (req, res) => {
                   Buffer.from(String(d.url).split(',').pop(), 'base64'));
               } catch (e6) {}
             });
+          }
+        } catch (e) {}
+        try {
+          const cvj = ch && (ch.canvases || [])[0] && (ch.canvases || [])[0].jpg;
+          if (cvj) {
+            require('fs').writeFileSync('/opt/gss/data/cap_canvas.jpg',
+              Buffer.from(String(cvj).split(',').pop(), 'base64'));
           }
         } catch (e) {}
         const slim = ch ? {
