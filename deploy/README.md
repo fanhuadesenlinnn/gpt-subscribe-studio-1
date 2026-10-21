@@ -1,5 +1,11 @@
 # 裸机部署（systemd，无 Docker）
 
+> **现状（2026-10-21）**：线上已切换为 **Docker 部署**，见
+> [docker/README.md](./docker/README.md)。浏览器路线终止后容器化重新可行
+> （唯一遗留的 Node 依赖是 Sentinel 令牌签发，不是浏览器）。
+> 本文保留作为裸机方案与回滚参考。
+
+
 线上就是这套：`/opt/gss` 下的 venv + systemd，没有容器。
 本文与服务器实际状态一致，逐步抄就能重建。
 

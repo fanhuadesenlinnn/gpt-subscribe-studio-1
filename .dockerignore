@@ -1,0 +1,15 @@
+# 构建上下文只需要代码与前端产物
+.git
+.gitignore
+**/node_modules
+**/.venv
+**/__pycache__
+**/*.pyc
+attic/
+runtime/
+tests/
+specs/
+docs/
+vendor/
+apps/web/node_modules
+*.md

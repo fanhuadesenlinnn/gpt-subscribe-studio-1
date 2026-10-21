@@ -1,0 +1,39 @@
+# 纯协议版部署：只有 API 一个容器，无浏览器、无求解器
+#
+# 用法：
+#   cd /opt/gss/src
+#   docker compose -f deploy/docker/docker-compose.yml up -d --build
+#
+# 端口只发布到 127.0.0.1，对外仍由 caddy 反代，和裸机时的暴露面一致。
+name: gss
+
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: gss-api:pureproto
+    container_name: gss-api
+    restart: unless-stopped
+    env_file:
+      - /opt/gss/app/.env
+    environment:
+      # 覆盖 .env 里指向宿主机 venv 的路径
+      PYTHONPATH: /app/packages/contracts/src:/app/packages/core/src:/app/services/account/src:/app/services/checkout/src:/app/services/payment/src:/app/services/api/src:/app/services/orchestrator/src
+      GSS_WEB_DIR: /app/web
+      GSS_LOGIN_FILE: /app/login.html
+      GSS_DATA_DIR: /data
+      GSS_CONFIG_DIR: /config
+      GSS_AUTH_FILE: /config/container-auth.json
+      GSS_BIND_HOST: 0.0.0.0
+      GSS_BIND_PORT: "18120"
+    volumes:
+      - /opt/gss/data:/data
+      - /opt/gss/config:/config:ro
+    ports:
+      - "127.0.0.1:18120:18120"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
