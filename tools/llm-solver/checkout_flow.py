@@ -65,6 +65,25 @@ async def solve_hcaptcha(page, tag=""):
             except Exception:
                 cv = None
             if not cv or not cv.get("jpg"):
+                # 没有 canvas → 这是 checkbox 帧，先点 I am human 让图像题出来
+                clicked = False
+                for sel in ('#checkbox', '[role="checkbox"]', 'div.checkbox'):
+                    try:
+                        cb = fr.locator(sel)
+                        if await cb.count() > 0:
+                            await cb.first.click(timeout=6000)
+                            clicked = True
+                            break
+                    except Exception:
+                        pass
+                if not clicked:
+                    try:
+                        await page.mouse.click(513, 437)
+                        clicked = True
+                    except Exception:
+                        pass
+                print(f"   {tag}点 I am human -> {clicked}", flush=True)
+                await page.wait_for_timeout(8000)
                 continue
             img = Path("/tmp/co_cv.jpg")
             img.write_bytes(base64.b64decode(str(cv["jpg"]).split(",")[-1]))

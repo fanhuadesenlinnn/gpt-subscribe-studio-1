@@ -678,3 +678,38 @@ if not cv:
 
 坐标 (513,437) 已验证有效（第 41 轮点了 18 次都成功）。
 canvas 读取 + 服务商 box 判题的代码已经就位，只差这个衔接。
+
+## 第 44 轮：canvas 读不到 —— 大概率是跨域污染
+
+```
+[0]点 I am human -> True   （重复 18 次）
+[0] 挑战处理: False
+```
+
+checkbox 点中了，但之后一直读不到 canvas，于是反复点同一个位置。
+
+### 原因判断
+
+`c.toDataURL()` 在 canvas 被跨域图片污染时会**直接抛异常**，
+而我的代码用 try/except 吞掉了，`cv` 变成 None，
+走到「没有 canvas → 点 checkbox」的分支 —— 形成死循环。
+
+hCaptcha 的题目图来自 `imgs*.hcaptcha.com`，与挑战 iframe 不同源，
+canvas 必然被污染，`toDataURL` 必然失败。
+
+### 下一轮修法（关键）
+
+**不要用 toDataURL，改用 Playwright 的元素截图**：
+
+```python
+canvas_el = await fr.query_selector("canvas")
+fp = Path("/tmp/co_cv.png")
+await canvas_el.screenshot(path=str(fp))     # 不受 CORS 影响
+```
+
+元素截图走的是浏览器渲染层，不读 canvas 的像素缓冲，
+所以跨域污染对它无效。这是唯一可靠的方式。
+
+拿到截图后：服务商判题（box/objects）→ 换算坐标 → 点击 → Verify。
+坐标换算要注意：截图是 CSS 像素尺寸，而服务商返回的是该图上的像素坐标，
+比例按 rect.w/rect.h 归一化即可。
