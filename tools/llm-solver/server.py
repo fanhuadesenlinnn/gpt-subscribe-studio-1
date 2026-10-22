@@ -403,6 +403,10 @@ async def solve_in_browser(sitekey: str, rqdata: str, proxy: str, host: str) -> 
                     await page.wait_for_timeout(430)
                 await page.wait_for_timeout(800)
                 log(f"   打码服务给 {len(svc['boxes'][:6])} 个点")
+                try:
+                    await page.screenshot(path=f"/tmp/hc_svc_clicked.png")
+                except Exception:
+                    pass
                 res.update({"kind": "point", "by": "service",
                             "boxes": svc["boxes"][:6]})
                 res["submit"] = await click_submit(fr)
