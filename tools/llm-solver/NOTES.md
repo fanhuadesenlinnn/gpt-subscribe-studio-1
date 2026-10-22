@@ -750,3 +750,39 @@ for _ in range(15):                     # 最多 30 秒
 
 只有轮询到真正可见的题目图之后，才进入判题；
 否则「没图就再点 checkbox」这个分支会把自己转成死循环。
+
+## 第 47 轮：★★ canvas 取到了！但题目是拖拽题 ★★
+
+```
+[0]点 I am human -> True   （首轮）
+[0]canvas 500x470 已截图            ← 元素截图成功，绕开跨域污染
+[0]题面=Drag the correct icon to complete the ci
+[0]box点数=0  objs=None
+```
+
+**canvas 读取终于通了**（元素截图方案有效，500×470）。
+但题面是 **"Drag the correct icon to complete the ci..."** —— 拖拽题。
+
+打码服务的 `HCaptchaClassification` 对拖拽题不返回 `box`，
+需要专门的拖拽格式：
+
+```python
+task = {
+    "type": "HCaptchaClassification",
+    "queries": [canvas_b64],
+    "question": prompt,
+    "drag": True,          # 或按服务商文档
+}
+# 返回 {box: [{"start":[x,y], "end":[x,y]}]}
+```
+
+之前第 29 轮记录过 YesCaptcha 的拖拽格式：
+`{type:"drag", box:[{start:[x,y], end:[x,y]}]}`，图片两边 ≥260px。
+
+### 下一轮的两种选择
+
+**A. 支持拖拽题** —— 按服务商格式再调一次，拿 start/end 做 `mouse.down → move → up`
+**B. 跳过拖拽题** —— 点 "Skip Challenge"，换一道点击/网格题（更省事）
+
+建议先做 B：Skip 按钮已经在 DOM 里（`DIV|Skip Challenge, page 1 of 2`），
+换到点击题后现有 box 逻辑立刻可用。

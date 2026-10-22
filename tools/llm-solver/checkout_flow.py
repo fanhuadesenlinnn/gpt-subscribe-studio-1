@@ -44,7 +44,7 @@ def proxy_cfg(url):
 
 async def solve_hcaptcha(page, tag=""):
     """canvas 版：元素截图（不受 CORS 影响）→ 打码服务 → 点击 → Verify。"""
-    for rnd in range(5):
+    for rnd in range(8):
         hit = False
         for fr in [f for f in page.frames if "hcaptcha" in (f.url or "")]:
             cv = None
@@ -73,6 +73,10 @@ async def solve_hcaptcha(page, tag=""):
             except Exception:
                 cv = None
 
+            if cv is None and rnd > 0:
+                # 后续轮次：只等待题目图渲染，不重复点方框
+                await page.wait_for_timeout(4000)
+                continue
             if cv is None:
                 clicked = False
                 for sel in ('#checkbox', '[role="checkbox"]', 'div.checkbox'):
