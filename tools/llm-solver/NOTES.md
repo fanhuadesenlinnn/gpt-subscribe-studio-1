@@ -434,3 +434,34 @@ email/phone/tos 那些在顶层 frame 的字段还没渲染。
 2. 顺序改成：等页面稳定 → email/phone/tos → 点 Card 圆圈 → 等新 frame
    → 卡号/有效期/CVC → 国家(>100 选项)/州/城市/邮编 → 提交
 3. 提交前截图确认四个字段都已填上
+
+## 第 36 轮：重要更正 —— 「Afghanistan」是选项列表，不是选中值
+
+```
+填表前 frame 数: 14（等待逻辑生效）
+已填字段: ['email','phone','tos','number','expiry','cvc','name']
+国家已选 US（select#0，238 选项）
+州已选 Oregon
+```
+
+页面正文里那段 `Billing address Afghanistan Åland Isla...`
+**是 `<select>` 的全部 option 文本**，不是当前选中值。
+
+第 30 轮的截图已经证明：国家选成功后框里显示的是 `United States`。
+所以前面好几轮我都被这段文本误导了 —— **国家其实选上了**。
+
+### 真正还差的
+
+`已填字段` 里没有 `city` 和 `postal`。
+国家变成 US 后，City / ZIP 才渲染，但 `try_fill` 用的选择器没命中：
+
+```
+input[name="city"]     ✗
+input[name="postal"]   ✗
+```
+
+### 下一轮
+
+在卡片 iframe 里 dump 一次 City/ZIP 两个 input 的真实属性
+（name / autocomplete / placeholder），照着填。
+这两项填完就能点 Subscribe。

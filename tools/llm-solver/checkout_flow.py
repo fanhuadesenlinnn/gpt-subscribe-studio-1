@@ -143,6 +143,13 @@ async def all_frames(page):
 
 async def fill_stripe_fields(page, card, email="buyer@example.com"):
     """按清单顺序填：email → ToS → phone → 卡（递归 frames）。"""
+    # 等页面加载稳定：frame 数达到 12+ 再开始填，避免字段还没渲染
+    for _w in range(30):
+        frames = await all_frames(page)
+        if len(frames) >= 12:
+            break
+        await page.wait_for_timeout(1000)
+    print("填表前 frame 数:", len(frames), flush=True)
     filled = []
     frames = await all_frames(page)
     print("frame 数(递归):", len(frames), flush=True)
