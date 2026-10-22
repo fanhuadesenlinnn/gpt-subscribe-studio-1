@@ -104,3 +104,64 @@ export DISPLAY=:99 GSS_LLM_BASE_URL=... GSS_LLM_KEY=... GSS_LLM_MODEL=...
 
 **成本对比**：打码服务 8 点/页；LLM 走中转，按 token 计费。
 本轮实测解一题 1 次调用，打码余额 **0 消耗**。
+
+---
+
+## 当前阻塞：token 的会话归属（14 轮实测结论）
+
+### 已经验证没问题的
+
+| 环节 | 证据 |
+|---|---|
+| 打码服务判题准确率 | 九宫格 3/3、点击题 2/2 命中，画到原图上逐个核过 |
+| 坐标换算 | 整张 canvas 直传后落点与目标重合 |
+| iframe 偏移 | 修复隐藏壳后点击进入挑战区（77,11） |
+| 多页答题 | 连续答 2-3 页，Next/Verify 都能点到 |
+| token 合法性 | `P1_` + HS256 JWT，4720-4796 字符，payload 含 cdata/passkey |
+
+### 卡住的地方
+
+token 每次都能产出，但 Stripe 一律返回：
+
+```
+payment_intent_authentication_failure
+"Captcha challenge failed. Try again with a different payment method."
+```
+
+已排除：
+- `_stripe_version` 用 `V_HOSTED` 还是 `V_FULL` —— 都拒
+- rqdata 明文比对 —— rqdata 加密在 cdata/passkey 里，本地看不到，此路不通
+
+### 最可能的根因
+
+**token 必须由 Stripe 自己创建的那个 hCaptcha 会话签发。**
+
+当前实现是「自建页面 + 相同 sitekey + 相同 rqdata」渲染 widget。
+即使 rqdata 一致，hCaptcha 内部仍是另一个会话实例（自己的 seed/session），
+Stripe 校验时发现不是它发起的那次会话，判失败。
+
+`stripe_js` 只暴露 `{rqdata, site_key, verification_url}` 三个字段，
+没有会话 id 可以复用 —— 说明这条路只能靠「在 Stripe 的挑战里作答」。
+
+### 下一步（未实现）
+
+正确做法是让 **Stripe.js 自己发起挑战**，我们在它的 iframe 里作答：
+
+```js
+// 页面加载 https://js.stripe.com/v3
+const stripe = Stripe(PUBLISHABLE_KEY);
+// client_secret 来自 confirm 响应的 payment_intent.client_secret
+const { error } = await stripe.handleNextAction({ clientSecret });
+// Stripe.js 会渲染真实的 intent_confirmation_challenge
+// → 此时 hCaptcha iframe 属于 Stripe 的会话
+// → 按现有方式（服务商判题 + 点击 + Verify）作答
+// → Stripe.js 自动调 verify_challenge
+```
+
+要点：
+1. 页面必须用**同一出口 IP**、同一 UA
+2. `handleNextAction` 渲染出的挑战 iframe 用现有的可见 iframe 选择逻辑即可
+3. 作完答后不需要我们手动调 verify_challenge —— Stripe.js 会自己提交
+4. 结果从 `handleNextAction` 的返回或页面状态读取
+
+这条路绕不开浏览器，但能彻底解决会话归属问题。
