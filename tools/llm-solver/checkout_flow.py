@@ -222,41 +222,45 @@ async def fill_stripe_fields(page, card, email="buyer@example.com"):
     ):
         ok = await try_fill(sels, val, lab)
         if not ok and lab == "postal":
-            done_cc = False
             for fr in frames:
-                if done_cc:
-                    break
-                for sel in ('[role="combobox"]', 'button[aria-haspopup="listbox"]'):
-                    if done_cc:
-                        break
+                try:
+                    has_card = await fr.locator('input[name="number"], input[autocomplete="cc-number"]').count()
+                except Exception:
+                    has_card = 0
+                if has_card == 0:
+                    continue
+                try:
+                    n_sel = await fr.locator("select").count()
+                except Exception:
+                    n_sel = 0
+                best, best_n = -1, 0
+                for i in range(n_sel):
                     try:
-                        cnt = await fr.locator(sel).count()
+                        cnt = await fr.locator("select").nth(i).locator("option").count()
                     except Exception:
-                        cnt = 0
-                    for i in range(cnt):
-                        try:
-                            el = fr.locator(sel).nth(i)
-                            txt = (await el.inner_text(timeout=2000)) or ""
-                        except Exception:
-                            continue
-                        if "Afghanistan" not in txt:
-                            continue
-                        try:
-                            await el.click(timeout=4000)
-                            await page.wait_for_timeout(800)
-                            await page.keyboard.type("United States", delay=45)
-                            await page.wait_for_timeout(900)
-                            await page.keyboard.press("Enter")
-                            await page.wait_for_timeout(1800)
-                            done_cc = True
-                            print("   已选账单国家（文本匹配 Afghanistan → US）", flush=True)
-                        except Exception:
-                            pass
-                        break
-            if done_cc:
-                frames = await all_frames(page)
+                        continue
+                    if cnt > best_n:
+                        best, best_n = i, cnt
+                if best >= 0 and best_n > 100:
+                    try:
+                        await fr.locator("select").nth(best).select_option("US", timeout=4000)
+                        print("   国家已选 US（select#" + str(best) + "，" + str(best_n) + " 选项）", flush=True)
+                        await page.wait_for_timeout(2000)
+                    except Exception as exc:
+                        print("   国家选择失败:", str(exc)[:60], flush=True)
+                for i in range(n_sel):
+                    try:
+                        el = fr.locator("select").nth(i)
+                        opts = await el.locator("option").all_inner_texts()
+                        if any((o or "").strip() == "Oregon" for o in opts):
+                            await el.select_option(label="Oregon", timeout=3000)
+                            print("   州已选 Oregon", flush=True)
+                            break
+                    except Exception:
+                        pass
+                break
+            frames = await all_frames(page)
             ok = await try_fill(sels, val, lab)
-
     return filled
 
 

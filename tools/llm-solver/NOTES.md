@@ -404,3 +404,33 @@ stripe.confirmPayment({clientSecret, confirmParams: {...}})
 
 1. **半自动**：人工在浏览器里过挑战，拿到 token 后程序接管 verify + poll
 2. **放弃挑战**：用卡池筛选（约 1/3 直接拒卡），挑战求解做成可选开关
+
+## 第 35 轮：找到账单国家下拉了
+
+```
+国家已选 US（select#0，238 选项）
+州已选 Oregon
+```
+
+**关键**：账单地址的国家/州下拉在**填卡号的那个 Stripe iframe 内部**，
+是原生 `<select>`，且国家那个有 **238 个选项** —— 用「选项数 > 100」
+就能精确区分它和电话国家码那个 select。
+
+### 但这次 email/phone/tos 没填上
+
+```
+frame 数(递归): 6      ← 只有 6 个 frame（正常是 14）
+已填字段: ['number','expiry','cvc','name']
+页面仍是 Email REQUIRED / Billing address Afghanistan
+```
+
+原因：这次页面还没加载完就开始填表了（frame 数 6 vs 14），
+email/phone/tos 那些在顶层 frame 的字段还没渲染。
+而且提交后表单重新渲染，国家又被重置回 Afghanistan。
+
+### 下一轮修法
+
+1. 填表前**等 frame 数稳定**（比如 ≥12）再开始，而不是固定 sleep
+2. 顺序改成：等页面稳定 → email/phone/tos → 点 Card 圆圈 → 等新 frame
+   → 卡号/有效期/CVC → 国家(>100 选项)/州/城市/邮编 → 提交
+3. 提交前截图确认四个字段都已填上
