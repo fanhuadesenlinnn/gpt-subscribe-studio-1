@@ -217,6 +217,7 @@ async def fill_stripe_fields(page, card, email="buyer@example.com"):
         (['input[name="expiry"]', 'input[autocomplete="cc-exp"]'], exp, "expiry"),
         (['input[name="cvc"]', 'input[autocomplete="cc-csc"]'], card["cvc"], "cvc"),
         (['input[name="name"]', 'input[autocomplete="cc-name"]'], "FIXTURE HOLDER", "name"),
+        (['input[name="city"]', 'input[autocomplete="address-level2"]'], "Portland", "city"),
         (['input[name="postal"]', 'input[autocomplete="postal-code"]'], "97211", "postal"),
     ):
         ok = await try_fill(sels, val, lab)
@@ -253,6 +254,41 @@ async def fill_stripe_fields(page, card, email="buyer@example.com"):
             if done_cc:
                 frames = await all_frames(page)
             ok = await try_fill(sels, val, lab)
+    # 账单州：原生 select 优先，否则 role=combobox
+    if "state" not in filled:
+        for fr in frames:
+            try:
+                sc = fr.locator('select[name="state"], select[autocomplete="address-level1"]')
+                if await sc.count() > 0:
+                    opts = await sc.first.locator("option").all_inner_texts()
+                    for cand in ("Oregon", "OR"):
+                        if any(cand.lower() in (o or "").lower() for o in opts):
+                            try:
+                                await sc.first.select_option(label=cand, timeout=3000)
+                            except Exception:
+                                await sc.first.select_option(cand, timeout=3000)
+                            filled.append("state")
+                            break
+                    break
+            except Exception:
+                pass
+    if "state" not in filled:
+        for fr in frames:
+            try:
+                cb = fr.locator('[role="combobox"]')
+                for i in range(await cb.count()):
+                    el = cb.nth(i)
+                    txt = (await el.inner_text(timeout=1500)) or ""
+                    if "State" in txt or "state" in txt:
+                        await el.click(timeout=4000)
+                        await page.wait_for_timeout(700)
+                        await page.keyboard.type("Oregon", delay=40)
+                        await page.wait_for_timeout(700)
+                        await page.keyboard.press("Enter")
+                        filled.append("state")
+                        break
+            except Exception:
+                pass
     return filled
 
 

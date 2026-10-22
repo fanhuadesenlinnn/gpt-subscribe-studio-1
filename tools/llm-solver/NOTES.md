@@ -302,3 +302,32 @@ fr.locator('select[name="state"]').select_option("OR")
 ```
 
 填完点 Subscribe → 挑战弹出 → 判题。
+
+## 第 31 轮：国家选择不稳定（偶发）
+
+同一份代码两次运行结果不同：
+
+| 轮次 | 结果 |
+|---|---|
+| 30 | 国家成功变成 United States（截图确认），卡/姓名/电话/ToS 全就位 |
+| 31 | 国家仍是 Afghanistan，后续 city/state/postal 全没填 |
+
+原因：`[role="combobox"]` 取的是 **index 0**，而页面上有多个 combobox
+（电话国家码、账单国家、州）。第 30 轮恰好命中了账单国家，第 31 轮命中了别的。
+
+### 修法（下一轮）
+
+必须按**文本内容**精确匹配，不能用索引：
+
+```python
+cb = fr.locator('[role="combobox"]')
+for i in range(await cb.count()):
+    txt = await cb.nth(i).inner_text()
+    if "Afghanistan" in txt:          # 账单国家独有的初值
+        await cb.nth(i).click()
+        await page.keyboard.type("United States")
+        await page.keyboard.press("Enter")
+        break
+```
+
+州同理：找文本含 "State" 的那个 combobox。
