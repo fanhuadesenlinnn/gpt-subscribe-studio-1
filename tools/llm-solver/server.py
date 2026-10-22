@@ -511,6 +511,28 @@ async def solve_in_browser(sitekey: str, rqdata: str, proxy: str, host: str) -> 
 
     if token:
         info["token"] = token
+        info["token_head"] = token[:12]
+        log(f"   token 长度 {len(token)} 头 {token[:12]}")
+        try:
+            import base64 as _b, json as _j
+            parts = token.split(".")
+            if len(parts) >= 2:
+                seg = parts[1] if not token.startswith("P1_") else token[3:].split(".")[1]
+                seg += "=" * (-len(seg) % 4)
+                payload = _j.loads(_b.urlsafe_b64decode(seg.replace("+", "-").replace("/", "_")))
+                rq_in_tok = str(payload.get("rqdata") or payload.get("rq") or "")
+                site = str(payload.get("sitekey") or payload.get("sk") or "")
+                log(f"   token 内 rqdata 长度 {len(rq_in_tok)} 与传入一致={rq_in_tok == rqdata}")
+                log(f"   token 内 sitekey={site[:12]} 与传入一致={site == sitekey}")
+                info["tok_rq_len"] = len(rq_in_tok)
+                info["tok_rq_match"] = (rq_in_tok == rqdata)
+                info["tok_sk_match"] = (site == sitekey)
+        except Exception as exc:  # noqa: BLE001
+            log(f"   token 解码失败: {str(exc)[:80]}")
+        try:
+            Path("/tmp/hc_last_token.txt").write_text(token)
+        except Exception:
+            pass
     else:
         info["error"] = "no_token"
     return info
