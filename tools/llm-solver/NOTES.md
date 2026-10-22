@@ -713,3 +713,40 @@ await canvas_el.screenshot(path=str(fp))     # 不受 CORS 影响
 拿到截图后：服务商判题（box/objects）→ 换算坐标 → 点击 → Verify。
 坐标换算要注意：截图是 CSS 像素尺寸，而服务商返回的是该图上的像素坐标，
 比例按 rect.w/rect.h 归一化即可。
+
+## 第 45-46 轮：canvas / img 都取不到
+
+```
+[0]点 I am human -> True   （反复）
+[0] 挑战处理: False
+```
+
+- `query_selector("canvas")` → None
+- `query_selector_all("img")` 里也没有 宽度>120 的可见元素
+
+但第 42 轮的 DOM dump 明明看到 `IMG||`（有 img，只是属性全空）。
+
+### 说明
+
+挑战帧在点完 checkbox 后的**那几秒里还没渲染完**，
+或者 img 尺寸为 0（未布局）。检查得太早。
+
+### 下一轮的关键改法
+
+不要「检查一次就决定」——要**轮询等待**：
+
+```python
+for _ in range(15):                     # 最多 30 秒
+    el = await fr.query_selector("canvas")
+    if el is None:
+        for im in await fr.query_selector_all("img"):
+            bb = await im.bounding_box()
+            if bb and bb["width"] > 200:
+                el = im; break
+    if el is not None:
+        break
+    await page.wait_for_timeout(2000)
+```
+
+只有轮询到真正可见的题目图之后，才进入判题；
+否则「没图就再点 checkbox」这个分支会把自己转成死循环。

@@ -43,29 +43,37 @@ def proxy_cfg(url):
 
 
 async def solve_hcaptcha(page, tag=""):
-    """canvas 版：读整张 canvas → 打码服务 box → 点击 → Verify。"""
-    for rnd in range(4):
-        cands = [f for f in page.frames if "hcaptcha" in (f.url or "")]
+    """canvas 版：元素截图（不受 CORS 影响）→ 打码服务 → 点击 → Verify。"""
+    for rnd in range(5):
         hit = False
-        for fr in cands:
+        for fr in [f for f in page.frames if "hcaptcha" in (f.url or "")]:
             cv = None
             try:
-                cv = await fr.evaluate(
-                    """() => {
-                         const cs = [...document.querySelectorAll('canvas')]
-                           .map(c => ({c, r: c.getBoundingClientRect()}))
-                           .filter(o => o.r.width > 120 && o.r.height > 120)
-                           .sort((a,b) => b.r.width*b.r.height - a.r.width*a.r.height);
-                         if (!cs.length) return null;
-                         const c = cs[0].c, r = cs[0].r;
-                         return {W: c.width, H: c.height,
-                                 rect: {x:r.x, y:r.y, w:r.width, h:r.height},
-                                 jpg: c.toDataURL('image/jpeg', 0.92)};
-                       }""")
+                # 优先 canvas；没有则退到挑战区里的 <img>
+                el = await fr.query_selector("canvas")
+                if el is None:
+                    imgs = await fr.query_selector_all("img")
+                    best = None
+                    for im in imgs:
+                        bb0 = await im.bounding_box()
+                        if bb0 and bb0["width"] > 120 and bb0["height"] > 80:
+                            if best is None or bb0["width"] * bb0["height"] > best[1]:
+                                best = (im, bb0["width"] * bb0["height"])
+                    if best is not None:
+                        el = best[0]
+                if el is not None:
+                    bb = await el.bounding_box()
+                    if bb and bb["width"] > 120 and bb["height"] > 120:
+                        fp = Path("/tmp/co_cv.png")
+                        await el.screenshot(path=str(fp))
+                        cv = {"W": cv_w(bb), "H": cv_h(bb),
+                              "rect": {"x": bb["x"], "y": bb["y"],
+                                       "w": bb["width"], "h": bb["height"]},
+                              "path": str(fp)}
             except Exception:
                 cv = None
-            if not cv or not cv.get("jpg"):
-                # 没有 canvas → 这是 checkbox 帧，先点 I am human 让图像题出来
+
+            if cv is None:
                 clicked = False
                 for sel in ('#checkbox', '[role="checkbox"]', 'div.checkbox'):
                     try:
@@ -85,9 +93,8 @@ async def solve_hcaptcha(page, tag=""):
                 print(f"   {tag}点 I am human -> {clicked}", flush=True)
                 await page.wait_for_timeout(8000)
                 continue
-            img = Path("/tmp/co_cv.jpg")
-            img.write_bytes(base64.b64decode(str(cv["jpg"]).split(",")[-1]))
-            # 题面
+
+            print(f"   {tag}canvas {cv['W']}x{cv['H']} 已截图", flush=True)
             prompt = ""
             try:
                 prompt = await fr.evaluate(
@@ -97,8 +104,9 @@ async def solve_hcaptcha(page, tag=""):
             except Exception:
                 pass
             prompt = " ".join(str(prompt).split())[:150]
+
             task = {"type": "HCaptchaClassification",
-                    "queries": [base64.b64encode(img.read_bytes()).decode()]}
+                    "queries": [base64.b64encode(Path(cv["path"]).read_bytes()).decode()]}
             if prompt:
                 task["question"] = prompt
             try:
@@ -110,34 +118,28 @@ async def solve_hcaptcha(page, tag=""):
                 print(f"   {tag}服务商异常:", str(exc)[:60], flush=True)
                 continue
             sol = j.get("solution") or {}
-            box = [float(x) for x in (sol.get("box") or [])]
+            box = []
+            for v in (sol.get("box") or []):
+                try:
+                    box.append(float(v))
+                except Exception:
+                    pass
             objs = sol.get("objects")
-            print(f"   {tag}题面={prompt[:45]} box={len(box)//2} objs={objs}", flush=True)
-            # 找 canvas 所在 iframe 的偏移
-            ox = oy = 0
-            try:
-                for el in await page.query_selector_all("iframe"):
-                    src = (await el.get_attribute("src")) or ""
-                    if "hcaptcha" in src:
-                        bb = await el.bounding_box()
-                        if bb and bb["width"] > 150:
-                            ox, oy = bb["x"], bb["y"]
-                            break
-            except Exception:
-                pass
+            print(f"   {tag}题面={prompt[:40]} box点数={len(box)//2} objs={objs}", flush=True)
+
             rect = cv["rect"]
             pts = []
-            if box:
+            if len(box) >= 2:
                 for i in range(0, len(box) - 1, 2):
                     pts.append((box[i], box[i + 1]))
             elif objs:
-                # 九宫格：按 3x3 中心
                 for i, v in enumerate(objs):
                     if v:
-                        pts.append(((i % 3 + 0.5) * cv["W"] / 3, (i // 3 + 0.5) * cv["H"] / 3))
+                        pts.append(((i % 3 + 0.5) * cv["W"] / 3,
+                                    (i // 3 + 0.5) * cv["H"] / 3))
             for bx, by in pts[:6]:
-                px = ox + rect["x"] + (bx / cv["W"]) * rect["w"]
-                py = oy + rect["y"] + (by / cv["H"]) * rect["h"]
+                px = rect["x"] + (bx / cv["W"]) * rect["w"]
+                py = rect["y"] + (by / cv["H"]) * rect["h"]
                 try:
                     await page.mouse.click(px, py)
                 except Exception:
@@ -161,6 +163,13 @@ async def solve_hcaptcha(page, tag=""):
             return True
     return False
 
+
+def cv_w(bb):
+    return max(1, round(bb["width"]))
+
+
+def cv_h(bb):
+    return max(1, round(bb["height"]))
 
 
 async def all_frames(page):
