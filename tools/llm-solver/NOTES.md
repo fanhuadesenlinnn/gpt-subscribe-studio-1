@@ -42,3 +42,23 @@ GSS_LLM_SOLVER_URL=http://127.0.0.1:8197
 
 **这是求解器第一次真正在主流程里跑通**（此前 16 轮全被旧代码挡住，一直在空转）。
 剩下的是 token 被 Stripe 拒收 —— 即会话归属问题，见 README 的方案。
+
+## handleNextAction 进展（第 19 轮）
+
+已打通：
+- 关掉协议内求解器（`GSS_LLM_SOLVER_URL=`）后，协议停在挑战处，
+  `confirm` 响应里的 `client_secret` 可以拿到（`pi_xxx_secret_xxx`，60 字符）
+- 这是 `stripe.handleNextAction({clientSecret})` 需要的输入
+
+当前阻塞：
+- 拿到 client_secret 后进入浏览器阶段，脚本卡在 `page.goto("https://example.com")`
+  直到 620s 超时被杀，连 "已调用 handleNextAction" 都没打出来
+- 说明 playwright + 代理的首次导航挂了（代理抖动 / Chrome 启动慢）
+
+下一轮排查顺序：
+1. 先用**不带代理**的 context 导航 example.com，确认浏览器本身能起
+2. 再带代理，把 goto 超时压到 20s 并重试 3 次
+3. 若 example.com 不稳，改用 `page.set_content` 直接写入（不需要导航）
+   —— 但 Stripe.js 需要 hcaptcha/stripe 的 iframe 能加载，
+   所以 origin 需要是真实域名，可用 `route()` 拦截任意域名返回我们的 HTML
+4. 每步都 print + `python -u`，避免再被缓冲坑掉
