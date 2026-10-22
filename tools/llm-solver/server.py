@@ -247,7 +247,9 @@ async def solve_in_browser(sitekey: str, rqdata: str, proxy: str, host: str) -> 
                      const t = document.createElement('canvas');
                      t.width = w; t.height = h;
                      t.getContext('2d').drawImage(c, minX, minY, w, h, 0, 0, w, h);
-                     return {W,H,rect,bbox:{minX,minY,w,h},jpg:t.toDataURL('image/jpeg',0.92)};
+                     const full = c.toDataURL('image/jpeg', 0.92);
+                     return {W,H,rect,bbox:{minX,minY,w,h},
+                             jpg:t.toDataURL('image/jpeg',0.92), full:full};
                    }""")
 
         async def click_submit(fr) -> str:
@@ -381,9 +383,12 @@ async def solve_in_browser(sitekey: str, rqdata: str, proxy: str, host: str) -> 
             if not cv or not cv.get("jpg"):
                 res["error"] = "no_canvas"
                 return res
+            # 用整张 canvas（不裁）→ 服务商坐标直接是 canvas 内部像素，
+            # 避免 bbox.minY 换算带来的系统性纵向偏移
             img = outdir / f"pt_{abs(hash(prompt)) % 100000}.jpg"
-            img.write_bytes(base64.b64decode(str(cv["jpg"]).split(",")[-1]))
-            bb = cv.get("bbox") or {"minX": 0, "minY": 0, "w": cv["W"], "h": cv["H"]}
+            src = cv.get("full") or cv.get("jpg")
+            img.write_bytes(base64.b64decode(str(src).split(",")[-1]))
+            bb = {"minX": 0, "minY": 0, "w": cv["W"], "h": cv["H"]}
 
             # 打码服务优先：它返回的 box 是上传图的像素坐标，实测对点击题很准
             svc = await classify_with_service(
