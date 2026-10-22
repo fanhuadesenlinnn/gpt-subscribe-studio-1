@@ -383,6 +383,29 @@ async def solve_in_browser(sitekey: str, rqdata: str, proxy: str, host: str) -> 
             img = outdir / f"pt_{abs(hash(prompt)) % 100000}.jpg"
             img.write_bytes(base64.b64decode(str(cv["jpg"]).split(",")[-1]))
             bb = cv.get("bbox") or {"minX": 0, "minY": 0, "w": cv["W"], "h": cv["H"]}
+
+            # 打码服务优先：它返回的 box 是上传图的像素坐标，实测对点击题很准
+            svc = await classify_with_service(
+                [base64.b64encode(img.read_bytes()).decode()], prompt)
+            if svc.get("boxes"):
+                rect0 = cv["rect"]
+                fb0 = await frame_box(fr) or {"x": 0, "y": 0}
+                for bx, by in svc["boxes"][:6]:
+                    px_in = max(0.0, min(float(bx), bb["w"] - 1))
+                    py_in = max(0.0, min(float(by), bb["h"] - 1))
+                    cx0 = (bb["minX"] + px_in) / cv["W"]
+                    cy0 = (bb["minY"] + py_in) / cv["H"]
+                    await page.mouse.click(fb0["x"] + rect0["x"] + cx0 * rect0["w"],
+                                           fb0["y"] + rect0["y"] + cy0 * rect0["h"])
+                    await page.wait_for_timeout(430)
+                await page.wait_for_timeout(800)
+                log(f"   打码服务给 {len(svc['boxes'][:6])} 个点")
+                res.update({"kind": "point", "by": "service",
+                            "boxes": svc["boxes"][:6]})
+                res["submit"] = await click_submit(fr)
+                return res
+            if svc.get("error") and svc["error"] != "empty_solution":
+                log(f"   服务商点击题不可用（{svc['error']}），改用 LLM")
             gimg, cw, ch, letters = grid_overlay(img, 10, 7)
             try:
                 pans = await llm.generate_with_images(
