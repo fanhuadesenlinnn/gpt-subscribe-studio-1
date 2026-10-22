@@ -163,3 +163,30 @@ frame.locator('input[name="name"]')        # 持卡人
 点 Submit → 若命中 challenge，Stripe 会在**它自己的页面**弹出 hCaptcha，
 此时 `solve_hcaptcha()` 能用（逻辑已就位），
 token 天然绑定 Stripe 会话 → 不需要任何 origin 技巧。
+
+## 第 26 轮：结账页输入框清单（关键数据）
+
+实测 `[input,select]` 清单（顶层 frame 可见的部分）：
+
+```
+email                          autocomplete=email      REQUIRED
+phoneNumberCountryCode         select
+phoneNumber                    autocomplete=tel
+termsOfServiceConsentCheckbox  checkbox
+```
+
+**Email 是 REQUIRED 且为空** —— 这是提交一直不生效的直接原因之一。
+另外还有 ToS 勾选框。
+
+卡号能填进 `cc-number`（在嵌套 Stripe iframe 里），但有效期/CVC 没找到，
+说明它们在更深一层 frame，需要递归遍历。
+
+### 下一轮顺序（重要）
+
+1. **先填 email**（`#email`，必填）
+2. **勾 ToS**（`#termsOfServiceConsentCheckbox`）
+3. 填 phone（可选但建议填，`#phoneNumber`）
+4. 再填卡：卡号 + 有效期 + CVC —— 需要**递归** page.frames（当前只遍历一层）
+5. 点提交 → 挑战弹出 → 判题
+
+顺序错了 Stripe 不会展开卡字段，也很难触发表单校验通过。
