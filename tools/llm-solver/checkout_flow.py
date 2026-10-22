@@ -224,8 +224,11 @@ async def fill_stripe_fields(page, card, email="buyer@example.com"):
         (['input[name="expiry"]', 'input[autocomplete="cc-exp"]'], exp, "expiry"),
         (['input[name="cvc"]', 'input[autocomplete="cc-csc"]'], card["cvc"], "cvc"),
         (['input[name="name"]', 'input[autocomplete="cc-name"]'], "FIXTURE HOLDER", "name"),
-        (['input[name="city"]', 'input[autocomplete="address-level2"]'], "Portland", "city"),
-        (['input[name="postal"]', 'input[autocomplete="postal-code"]'], "97211", "postal"),
+        (['input[name="city"]', 'input[autocomplete="address-level2"]',
+          'input[placeholder="City"]', 'input[placeholder*="City" i]'], "Portland", "city"),
+        (['input[name="postal"]', 'input[autocomplete="postal-code"]',
+          'input[placeholder="ZIP"]', 'input[placeholder*="ZIP" i]',
+          'input[placeholder*="Postal" i]'], "97211", "postal"),
     ):
         ok = await try_fill(sels, val, lab)
         if not ok and lab == "postal":

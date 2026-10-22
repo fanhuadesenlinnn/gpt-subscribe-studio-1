@@ -465,3 +465,29 @@ input[name="postal"]   ✗
 在卡片 iframe 里 dump 一次 City/ZIP 两个 input 的真实属性
 （name / autocomplete / placeholder），照着填。
 这两项填完就能点 Subscribe。
+
+## 第 37 轮：9 个字段全部填上
+
+```
+已填字段: ['email','phone','tos','number','expiry','cvc','name','city','postal']
+```
+
+City / ZIP 之前填不进去，是因为只用了 `name=` 和 `autocomplete=` 选择器；
+补上 **placeholder 兜底** 立刻就命中了：
+
+```
+input[placeholder="City"]
+input[placeholder="ZIP"]
+input[placeholder*="Postal" i]
+```
+
+### 还差最后一步
+
+这次国家/州的选择没跑（那段逻辑只在 postal 失败时触发，
+现在 postal 直接成功就跳过了）。提交后表单仍停在原页面。
+
+下一轮把顺序改成：
+1. 先选国家（select >100 选项）→ 州（Oregon）
+2. 再填 city / postal
+3. 点 Subscribe
+不要用「postal 失败才选国家」这种条件触发。
