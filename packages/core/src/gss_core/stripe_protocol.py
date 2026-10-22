@@ -158,6 +158,9 @@ class StripeProtocol:
         self._captcha_client: httpx.Client | None = None
         # solver 会话：passive 与 challenge 必须同一浏览器 + 同一出口 IP
         self._email_cache = ""
+        # LLM 打码求解服务（tools/llm-solver/server.py）。
+        # 给定时，命中 intent_confirmation_challenge 就去解，解出 token 继续 verify。
+        self.challenge_solver_url = os.environ.get("GSS_LLM_SOLVER_URL", "").rstrip("/")
         # 由浏览器 Stripe 输入框产出的 pm_：给定时跳过服务端 tokenize。
         # 卡数据经过 Stripe iframe（真实用户路径），hCaptcha/Radar 判定更宽松。
         self.external_pm = ""
@@ -671,6 +674,38 @@ class StripeProtocol:
             return {"status": r.status_code, "body": {"raw": r.text[:800]}}
 
     # ── ⑦c verify_challenge ────────────────────────────────
+    def _solve_challenge(self, site_key: str, rqdata: str) -> dict[str, Any] | None:
+        """调 LLM 打码服务，在「同一出口」的浏览器里把挑战答出来。
+
+        返回 {"token": str} 或 None。服务不可用时返回 None，调用方照旧放弃。
+        """
+        if not self.challenge_solver_url or not site_key:
+            return None
+        try:
+            payload = {
+                "sitekey": site_key,
+                "rqdata": rqdata,
+                "proxy": self.proxy or "",
+                "host": "b.stripecdn.com",
+            }
+            r = httpx.post(
+                f"{self.challenge_solver_url}/solve", json=payload,
+                timeout=httpx.Timeout(420.0, connect=15.0),
+            )
+            data: dict[str, Any] = {}
+            try:
+                data = r.json() or {}
+            except Exception:
+                data = {}
+            tok = str(data.get("token") or "")
+            if r.status_code == 200 and tok:
+                return {"token": tok, "ekey": ""}
+            log(f"   求解服务未通过：{data.get('error') or r.status_code} "
+                f"{str(data.get('rounds'))[:160]}")
+        except Exception as exc:  # noqa: BLE001
+            log(f"   求解服务异常：{str(exc)[:120]}")
+        return None
+
     def verify_challenge(
         self, path: str, token: str, client_secret: str, ekey: str = ""
     ) -> dict[str, Any]:
@@ -916,11 +951,14 @@ class StripeProtocol:
             sj = sdk.get("stripe_js") or {}
             pi = body.get("payment_intent") or {}
             log(f"⑦b 命中 challenge（第 {round_no + 1} 次）site_key={str(sj.get('site_key'))[:8]}")
-            log("   纯协议模式：不出浏览器、不调打码，直接放弃本单")
-            abandoned = True
-            ch = None
+            ch = self._solve_challenge(
+                str(sj.get("site_key") or ""), str(sj.get("rqdata") or "")
+            )
             if not (ch and sj.get("verification_url")):
+                log("   未解出挑战，放弃本单")
+                abandoned = True
                 break
+            log(f"   解出 token（{len(ch.get('token') or '')} 字符），继续 verify")
             v = self.verify_challenge(
                 str(sj["verification_url"]), ch["token"],
                 str(pi.get("client_secret") or ""), ch.get("ekey", ""),

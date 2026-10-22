@@ -30,6 +30,9 @@ services:
     volumes:
       - /opt/gss/data:/data
       - /opt/gss/config:/config:ro
+    # 让容器能访问宿主机的 LLM 打码求解服务（127.0.0.1:8197）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:18120:18120"
     logging:
