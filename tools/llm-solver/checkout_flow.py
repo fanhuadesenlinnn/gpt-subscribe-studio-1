@@ -43,62 +43,32 @@ def proxy_cfg(url):
 
 
 async def solve_hcaptcha(page, tag=""):
-    """在 page 里找 hcaptcha 挑战帧并作答。返回是否提交过。"""
+    """canvas 版：读整张 canvas → 打码服务 box → 点击 → Verify。"""
     for rnd in range(4):
-        frames = [f for f in page.frames if "hcaptcha" in (f.url or "")]
-        if not frames:
-            await page.wait_for_timeout(4000)
-            continue
-        for fr in frames:
+        cands = [f for f in page.frames if "hcaptcha" in (f.url or "")]
+        hit = False
+        for fr in cands:
+            cv = None
             try:
-                n = await fr.locator('div[role=button][aria-label*="Challenge Image"]').count()
+                cv = await fr.evaluate(
+                    """() => {
+                         const cs = [...document.querySelectorAll('canvas')]
+                           .map(c => ({c, r: c.getBoundingClientRect()}))
+                           .filter(o => o.r.width > 120 && o.r.height > 120)
+                           .sort((a,b) => b.r.width*b.r.height - a.r.width*a.r.height);
+                         if (!cs.length) return null;
+                         const c = cs[0].c, r = cs[0].r;
+                         return {W: c.width, H: c.height,
+                                 rect: {x:r.x, y:r.y, w:r.width, h:r.height},
+                                 jpg: c.toDataURL('image/jpeg', 0.92)};
+                       }""")
             except Exception:
-                n = 0
-            if n == 0:
-                done = False
-                for sel in ('#checkbox', '[role="checkbox"]', 'div.checkbox'):
-                    try:
-                        cb = fr.locator(sel)
-                        if await cb.count() > 0:
-                            await cb.first.click(timeout=6000)
-                            done = True
-                            break
-                    except Exception:
-                        pass
-                if not done:
-                    # 坐标兜底：截图里方框在 (513,437)
-                    try:
-                        await page.mouse.click(513, 437)
-                        done = True
-                    except Exception:
-                        pass
-                print(f"   {tag}点了我 am human ->", done, flush=True)
-                await page.wait_for_timeout(7000)
-                # 点完立刻勘查：所有 frame + 挑战帧 DOM 片段
-                try:
-                    await page.screenshot(path=f"/tmp/co_after_hc_{rnd}.png")
-                except Exception:
-                    pass
-                for f2 in page.frames:
-                    u = f2.url or ""
-                    if "hcaptcha" not in u:
-                        continue
-                    print("   frame:", u[:70], flush=True)
-                    try:
-                        frag = await f2.evaluate(
-                            """() => {
-                                 const b = document.body;
-                                 if (!b) return '';
-                                 const imgs = [...b.querySelectorAll('[role=button],img,canvas')]
-                                   .slice(0,12).map(e => e.tagName + '|' +
-                                     (e.getAttribute('aria-label')||'') + '|' +
-                                     (e.className||'').toString().slice(0,20));
-                                 return imgs.join(' ; ').slice(0, 500);
-                               }""")
-                        print("     元素:", frag, flush=True)
-                    except Exception as exc:
-                        print("     dump失败:", str(exc)[:50], flush=True)
+                cv = None
+            if not cv or not cv.get("jpg"):
                 continue
+            img = Path("/tmp/co_cv.jpg")
+            img.write_bytes(base64.b64decode(str(cv["jpg"]).split(",")[-1]))
+            # 题面
             prompt = ""
             try:
                 prompt = await fr.evaluate(
@@ -108,58 +78,70 @@ async def solve_hcaptcha(page, tag=""):
             except Exception:
                 pass
             prompt = " ".join(str(prompt).split())[:150]
-            cells = fr.locator('div[role=button][aria-label*="Challenge Image"]')
-            tiles = []
-            for i in range(min(n, 9)):
-                fp = Path(f"/tmp/co_t{i}.png")
-                try:
-                    await cells.nth(i).screenshot(path=str(fp), timeout=6000)
-                    tiles.append(fp)
-                except Exception:
-                    tiles.append(None)
-            if not any(tiles):
-                continue
             task = {"type": "HCaptchaClassification",
-                    "queries": [base64.b64encode(Path(t).read_bytes()).decode()
-                                for t in tiles if t]}
+                    "queries": [base64.b64encode(img.read_bytes()).decode()]}
             if prompt:
                 task["question"] = prompt
-            async with httpx.AsyncClient(timeout=90) as c:
-                r = await c.post("https://api.yescaptcha.com/createTask",
-                                 json={"clientKey": CAPTCHA_KEY, "task": task})
-                j = r.json() or {}
+            try:
+                async with httpx.AsyncClient(timeout=90) as c:
+                    r = await c.post("https://api.yescaptcha.com/createTask",
+                                     json={"clientKey": CAPTCHA_KEY, "task": task})
+                    j = r.json() or {}
+            except Exception as exc:
+                print(f"   {tag}服务商异常:", str(exc)[:60], flush=True)
+                continue
             sol = j.get("solution") or {}
-            idx = [i for i, v in enumerate(sol.get("objects") or []) if v]
-            print(f"   {tag}题面={prompt[:50]} 服务商={idx}", flush=True)
-            boxes = await fr.evaluate(
-                """() => [...document.querySelectorAll('div[role=button][aria-label*="Challenge Image"]')]
-                     .map(d => { const r = d.getBoundingClientRect();
-                       return {x:r.x+r.width/2, y:r.y+r.height/2}; })""")
-            boxes = sorted(boxes, key=lambda q: (round(q["y"] / 20), q["x"]))
-            # 找 hcaptcha 帧的 iframe 偏移
+            box = [float(x) for x in (sol.get("box") or [])]
+            objs = sol.get("objects")
+            print(f"   {tag}题面={prompt[:45]} box={len(box)//2} objs={objs}", flush=True)
+            # 找 canvas 所在 iframe 的偏移
             ox = oy = 0
-            for el in await page.query_selector_all("iframe"):
-                src = (await el.get_attribute("src")) or ""
-                if "hcaptcha" in src:
-                    bb = await el.bounding_box()
-                    if bb:
-                        ox, oy = bb["x"], bb["y"]
-                    break
-            for i2 in idx:
-                if 0 <= i2 < len(boxes):
-                    await page.mouse.click(ox + boxes[i2]["x"], oy + boxes[i2]["y"])
-                    await page.wait_for_timeout(430)
-            for lab in ("Verify", "Next", "Submit"):
+            try:
+                for el in await page.query_selector_all("iframe"):
+                    src = (await el.get_attribute("src")) or ""
+                    if "hcaptcha" in src:
+                        bb = await el.bounding_box()
+                        if bb and bb["width"] > 150:
+                            ox, oy = bb["x"], bb["y"]
+                            break
+            except Exception:
+                pass
+            rect = cv["rect"]
+            pts = []
+            if box:
+                for i in range(0, len(box) - 1, 2):
+                    pts.append((box[i], box[i + 1]))
+            elif objs:
+                # 九宫格：按 3x3 中心
+                for i, v in enumerate(objs):
+                    if v:
+                        pts.append(((i % 3 + 0.5) * cv["W"] / 3, (i // 3 + 0.5) * cv["H"] / 3))
+            for bx, by in pts[:6]:
+                px = ox + rect["x"] + (bx / cv["W"]) * rect["w"]
+                py = oy + rect["y"] + (by / cv["H"]) * rect["h"]
+                try:
+                    await page.mouse.click(px, py)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(430)
+            await page.wait_for_timeout(700)
+            for lab in ("Verify Answers", "Next", "Verify", "Submit"):
                 try:
                     bt = fr.locator(f"xpath=//*[normalize-space(text())='{lab}']")
                     if await bt.count() > 0:
                         await bt.first.click(timeout=5000)
                         print(f"   {tag}提交 {lab}", flush=True)
-                        return True
+                        hit = True
+                        break
                 except Exception:
                     pass
+            if hit:
+                break
+        await page.wait_for_timeout(5000)
+        if hit:
             return True
     return False
+
 
 
 async def all_frames(page):

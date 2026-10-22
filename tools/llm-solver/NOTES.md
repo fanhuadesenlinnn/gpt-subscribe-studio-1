@@ -649,3 +649,32 @@ for bx, by in zip(sol['box'][::2], sol['box'][1::2]):
 ```
 
 按钮选择器也拿到了：`DIV|Verify Answers`、`DIV|Skip Challenge, page 1 of 2`。
+
+## 第 43 轮：canvas 版已移植，但漏了「先点 checkbox」
+
+```
+挑战帧已出现
+[0] 挑战处理: False      ← 没有打印"题面=... box=..."，说明没读到 canvas
+```
+
+替换 solve_hcaptcha 时把「点 I am human」那段一起删掉了。
+现在流程是：挑战帧一出现（其实是 checkbox 帧）就去读 canvas，
+读不到就返回 False —— **没有先点方框，图像题根本没出来**。
+
+### 下一轮（很小的一步）
+
+在 canvas 之前补回 checkbox 点击：
+
+```python
+# 若该帧没有 canvas，先点 I am human，等 6-8 秒让图像题出来
+if not cv:
+    for sel in ('#checkbox', '[role="checkbox"]'):
+        ...
+    else:
+        await page.mouse.click(513, 437)
+    await page.wait_for_timeout(7000)
+    continue   # 下一轮 rnd 再读 canvas
+```
+
+坐标 (513,437) 已验证有效（第 41 轮点了 18 次都成功）。
+canvas 读取 + 服务商 box 判题的代码已经就位，只差这个衔接。
