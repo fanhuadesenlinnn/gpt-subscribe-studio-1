@@ -190,3 +190,32 @@ termsOfServiceConsentCheckbox  checkbox
 5. 点提交 → 挑战弹出 → 判题
 
 顺序错了 Stripe 不会展开卡字段，也很难触发表单校验通过。
+
+## 第 27 轮：填表顺序生效，卡字段需要先点开
+
+```
+frame 数(递归): 14
+已填字段: ['email', 'phone', 'tos']      ← 三个都成功
+未找到: number / expiry / cvc / postal   ← 卡字段还没渲染
+页面提示: PAYMENT METHOD  REQUIRED
+```
+
+**结论**：填完 email / phone / ToS 后，页面才要求填支付方式，
+但 Stripe 的卡字段是**懒渲染**的 —— 必须先点一下卡号区域（或 Card 选项）
+才会创建那个 iframe。
+
+### 下一轮的填卡步骤
+
+```python
+# 1. 点 Card 单选（如果存在）
+frame.locator('text=Card').click()
+# 2. 点卡号区域，触发 Stripe 创建 card iframe
+frame.locator('#card-number, [data-testid="card-number"]').click()
+await page.wait_for_timeout(3000)
+# 3. 重新递归收集 frames，此时 cc-number 才出现
+frames = await all_frames(page)
+# 4. 再填 number / expiry / cvc / postal
+```
+
+注意：第 25 轮曾成功填进 `cc-number`（那次是先 `name*="number"` 命中的），
+说明 iframe 在某个时机确实存在 —— 关键是**先交互再填**。
