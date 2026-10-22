@@ -491,3 +491,27 @@ input[placeholder*="Postal" i]
 2. 再填 city / postal
 3. 点 Subscribe
 不要用「postal 失败才选国家」这种条件触发。
+
+## 第 38 轮：全部字段填完，但提交未触发挑战
+
+```
+国家已选 US（select#0，238 选项）
+州已选 Oregon
+已填字段: ['email','phone','tos','number','expiry','cvc','name','city','city','postal']
+点击提交: button[type=submit]
+[0] 挑战处理: False
+```
+
+**11 项全部填上**（city 出现两次因为触发条件改为 city 时又填了一遍）。
+
+但点提交后页面没变化，也没弹挑战。
+
+### 下一轮先截图看校验状态
+
+提交后立即截图，看是：
+- 还有哪个字段标红（比如 Address line 1 可能也是必填）
+- 还是 Subscribe 按钮被禁用
+- 还是点击没落在按钮上（`button[type=submit]` 可能匹配到隐藏的）
+
+注意截图里地址区有 `Address line 2 (Optional)`，说明 **Address line 1 = Street 可能是必填的**，
+而我们从来没填过街道地址。

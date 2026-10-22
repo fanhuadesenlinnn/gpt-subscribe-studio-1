@@ -231,7 +231,7 @@ async def fill_stripe_fields(page, card, email="buyer@example.com"):
           'input[placeholder*="Postal" i]'], "97211", "postal"),
     ):
         ok = await try_fill(sels, val, lab)
-        if not ok and lab == "postal":
+        if lab == "city":
             for fr in frames:
                 try:
                     has_card = await fr.locator('input[name="number"], input[autocomplete="cc-number"]').count()
