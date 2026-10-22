@@ -73,7 +73,31 @@ async def solve_hcaptcha(page, tag=""):
                     except Exception:
                         pass
                 print(f"   {tag}点了我 am human ->", done, flush=True)
-                await page.wait_for_timeout(6000)
+                await page.wait_for_timeout(7000)
+                # 点完立刻勘查：所有 frame + 挑战帧 DOM 片段
+                try:
+                    await page.screenshot(path=f"/tmp/co_after_hc_{rnd}.png")
+                except Exception:
+                    pass
+                for f2 in page.frames:
+                    u = f2.url or ""
+                    if "hcaptcha" not in u:
+                        continue
+                    print("   frame:", u[:70], flush=True)
+                    try:
+                        frag = await f2.evaluate(
+                            """() => {
+                                 const b = document.body;
+                                 if (!b) return '';
+                                 const imgs = [...b.querySelectorAll('[role=button],img,canvas')]
+                                   .slice(0,12).map(e => e.tagName + '|' +
+                                     (e.getAttribute('aria-label')||'') + '|' +
+                                     (e.className||'').toString().slice(0,20));
+                                 return imgs.join(' ; ').slice(0, 500);
+                               }""")
+                        print("     元素:", frag, flush=True)
+                    except Exception as exc:
+                        print("     dump失败:", str(exc)[:50], flush=True)
                 continue
             prompt = ""
             try:

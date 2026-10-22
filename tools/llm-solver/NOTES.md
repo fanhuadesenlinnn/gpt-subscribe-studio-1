@@ -612,3 +612,40 @@ for fr in frames:
 
 已有能力储备：一旦拿到 9 张格子图，判题逻辑立刻可用
 （服务商 3/3、2/2 命中，坐标换算已标定）。
+
+## 第 42 轮：★ 找到原因 —— 这个挑战是 canvas 渲染，不是 DOM 九宫格 ★
+
+点完 checkbox 后 dump 挑战帧 DOM：
+
+```
+DIV|Verify Answers|button-submit button
+DIV|EN - English, Select a language|button
+DIV|Refresh Challenge.|refresh button
+DIV|Skip Challenge, page 1 of 2|button-submit button
+IMG||          ← 只有一张图
+(没有任何 div[role=button] 格子)
+```
+
+**关键结论：Stripe 内嵌的 hCaptcha 用 canvas 绘制题目，
+格子不是 DOM 元素。** 所以 `div[role=button][aria-label*="Challenge Image"]`
+永远返回 0 —— 这正是前几轮失败的原因。
+
+### 好消息：canvas 读取逻辑我们已经有了
+
+`tools/llm-solver/server.py` 里的 `read_canvas()` 就是干这个的：
+读 canvas 的 `getImageData` → 得到整张图 → 发给打码服务 →
+拿 `box` 坐标 → 换算点击。**这条链在自建页面那次验证过，落点精确。**
+
+### 下一轮
+
+把 `read_canvas` + 服务商 `box` 判题搬到 `checkout_flow.py`：
+
+```python
+cv = await fr.evaluate(read_canvas_js)     # 整张 canvas jpg
+sol = await classify([cv], prompt)          # 服务商返回 box
+for bx, by in zip(sol['box'][::2], sol['box'][1::2]):
+    click(iframe_x + rect_x + bx/W*rect_w, ...)
+# 然后点 Verify Answers / Next
+```
+
+按钮选择器也拿到了：`DIV|Verify Answers`、`DIV|Skip Challenge, page 1 of 2`。
