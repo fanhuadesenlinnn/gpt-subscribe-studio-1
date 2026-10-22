@@ -132,3 +132,34 @@ net::ERR_CONNECTION_CLOSED   (pay.openai.com 主文档、r.stripe.com/0、stripe
 5. 读最终状态：3DS / declined / success
 
 注意：这条走的是「浏览器全流程」，不是协议模式，但能真正测出卡的最终结果。
+
+## 第 25 轮：结账页全流程第一次跑通到填卡
+
+```
+结账页:     https://pay.openai.com/c/pay/cs_live_...
+导航成功:   True（重试机制有效）
+已填字段:   ['number']        ← 卡号填进去了，有效期/CVC 没找到
+点击提交:   button[type=submit]
+挑战处理:   False（表单没填完，Stripe 校验拦下，没到挑战环节）
+```
+
+### 下一步要用的选择器
+
+Stripe 的输入框在 `__privateStripeFrame...` 里，用**标准 autocomplete 属性**定位最稳：
+
+```python
+frame.locator('input[autocomplete="cc-number"]')
+frame.locator('input[autocomplete="cc-exp"]')
+frame.locator('input[autocomplete="cc-csc"]')
+frame.locator('input[name="postal"]')      # 邮编
+frame.locator('input[name="name"]')        # 持卡人
+```
+
+地址栏显示 "Enter address to calculate" —— 说明邮编是必填项，
+不填会卡在税额计算，提交按钮不生效。
+
+### 填完后
+
+点 Submit → 若命中 challenge，Stripe 会在**它自己的页面**弹出 hCaptcha，
+此时 `solve_hcaptcha()` 能用（逻辑已就位），
+token 天然绑定 Stripe 会话 → 不需要任何 origin 技巧。
