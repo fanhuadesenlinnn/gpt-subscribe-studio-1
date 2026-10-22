@@ -219,3 +219,30 @@ frames = await all_frames(page)
 
 注意：第 25 轮曾成功填进 `cc-number`（那次是先 `name*="number"` 命中的），
 说明 iframe 在某个时机确实存在 —— 关键是**先交互再填**。
+
+## 第 28 轮：卡字段填成功（关键突破）
+
+```
+点击圆圈(相对文字): 750 226
+点开后 frame 数: 14 → 16          ← Card iframe 创建了
+已填字段: ['email','phone','tos','number','expiry','cvc']
+```
+
+**卡号 / 有效期 / CVC 全部填入成功。**
+
+### 关键点
+
+1. 支付方式必须先选中 **Card 单选圆圈** —— 圆圈在 "Card" 文字左侧约 **42px**，
+   点文字或点整行都无效，必须点圆圈本身
+2. 选中后 Stripe 才会创建 card iframe（frame 数 14 → 16）
+3. 然后才能填 number / expiry / cvc
+
+### 还差的最后两个必填
+
+页面现在提示：
+```
+Cardholder name   REQUIRED
+Billing address   （Country / 邮编）
+```
+
+填完这两项 + 点 Subscribe，挑战就会弹出。
