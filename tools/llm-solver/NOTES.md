@@ -364,3 +364,43 @@ info = await fr.evaluate("""() => {
 拿到真实结构后再写选择器。第 30 轮能成功是因为当时页面上
 "Afghanistan" 恰好在某个 combobox 的 innerText 里，但这次没有 —— 结构不稳定，
 必须看清再写。
+
+## 第 33 轮：勘查也没打印出来
+
+dump 没有输出，说明 `textContent.startsWith('Billing address')` 这个定位没命中
+—— 账单地址区在 card iframe 内部，DOM 结构的层级比预期深，
+`children.length < 6` 这个过滤条件把它排除了。
+
+### 结论：这条路的成本已经很高
+
+33 轮下来，结账页自动化稳定拿到的：
+
+```
+结账页加载 ✓   email ✓   phone ✓   ToS ✓
+卡号 ✓  有效期 ✓  CVC ✓  持卡人姓名 ✓
+```
+
+剩下账单地址（国家/州/市/邮编）是 Stripe 的自定义组件，
+每轮只能靠试错推进，单次实验成本约 4 分钟。
+
+### 更省力的替代做法（未验证）
+
+不要自己填表 —— **用 Chrome 的 JS 直接调 Stripe 的 confirm**：
+
+结账页本身是 Stripe hosted checkout，页面上下文里已经有 `stripe` 实例
+和 `clientSecret`。可以在页面里执行：
+
+```js
+// 在结账页内执行，挑战仍由 Stripe 自己渲染（origin 正确）
+stripe.confirmPayment({clientSecret, confirmParams: {...}})
+```
+
+但 hosted checkout 用的是内部 API，不保证暴露 `stripe` 全局。
+所以仍然回到「填表」这一条。
+
+### 建议
+
+继续死磕 UI 的边际收益已经很低。两个更实际的方向：
+
+1. **半自动**：人工在浏览器里过挑战，拿到 token 后程序接管 verify + poll
+2. **放弃挑战**：用卡池筛选（约 1/3 直接拒卡），挑战求解做成可选开关
