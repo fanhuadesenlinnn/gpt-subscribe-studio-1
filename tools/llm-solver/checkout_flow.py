@@ -224,6 +224,8 @@ async def fill_stripe_fields(page, card, email="buyer@example.com"):
         (['input[name="expiry"]', 'input[autocomplete="cc-exp"]'], exp, "expiry"),
         (['input[name="cvc"]', 'input[autocomplete="cc-csc"]'], card["cvc"], "cvc"),
         (['input[name="name"]', 'input[autocomplete="cc-name"]'], "FIXTURE HOLDER", "name"),
+        (['input[name="address1"]', 'input[autocomplete="address-line1"]',
+          'input[placeholder*="Address" i]'], "1 Fixture St", "address1"),
         (['input[name="city"]', 'input[autocomplete="address-level2"]',
           'input[placeholder="City"]', 'input[placeholder*="City" i]'], "Portland", "city"),
         (['input[name="postal"]', 'input[autocomplete="postal-code"]',
@@ -349,7 +351,8 @@ async def main():
             if not did:
                 break
 
-        await page.wait_for_timeout(8000)
+        await page.screenshot(path="/tmp/co_after_submit.png")
+        await page.wait_for_timeout(9000)
         try:
             print("最终正文:", (await page.inner_text("body"))[:400].replace("\n", " "), flush=True)
         except Exception:
