@@ -23,7 +23,7 @@ from hcaptcha_challenger.tools.internal.providers.anthropic_compat import (
 
 API = "http://127.0.0.1:18120"
 STRIPE = "https://api.stripe.com"
-ORIGIN = "https://pay.tokenfly.shop"
+ORIGIN = os.environ.get("GSS_PUBLIC_ORIGIN", "https://<PAY_HOST>")
 CHROME = "/usr/bin/google-chrome"
 # 中转地址 / key / 模型都从环境变量取，不写死在仓库里
 LLM_BASE = os.environ.get("GSS_LLM_BASE_URL", "")
