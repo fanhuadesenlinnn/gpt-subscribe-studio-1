@@ -592,3 +592,23 @@ for fr in frames:
 
 同时也可以直接用坐标点：截图里 checkbox 在 (513, 437)，页面坐标系
 和 viewport 一致，`page.mouse.click(513, 437)` 最直接。
+
+## 第 41 轮：checkbox 点到了，但图像题格子没识别出来
+
+```
+[0]点了我 am human -> True   （重复多次）
+[0] 挑战处理: False
+```
+
+坐标点 (513,437) 有效，方框点中了。但点完之后
+`div[role=button][aria-label*="Challenge Image"]` 一直是 0，
+所以脚本反复点同一个位置，没有进入判题流程。
+
+### 下一轮
+
+点完 checkbox 后截图 + dump 挑战帧 DOM，确认：
+1. 图像题到底出现在哪个 frame（可能是新开的 frame）
+2. 九宫格的真实选择器是什么（新版 hCaptcha 可能改了 aria-label）
+
+已有能力储备：一旦拿到 9 张格子图，判题逻辑立刻可用
+（服务商 3/3、2/2 命中，坐标换算已标定）。

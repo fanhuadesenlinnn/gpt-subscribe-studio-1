@@ -55,14 +55,25 @@ async def solve_hcaptcha(page, tag=""):
             except Exception:
                 n = 0
             if n == 0:
-                try:
-                    cb = fr.locator("#checkbox")
-                    if await cb.count() > 0:
-                        await cb.first.click(timeout=6000)
-                        print(f"   {tag}点了 I am human", flush=True)
-                        await page.wait_for_timeout(5000)
-                except Exception as exc:
-                    print(f"   {tag}checkbox 失败:", str(exc)[:50], flush=True)
+                done = False
+                for sel in ('#checkbox', '[role="checkbox"]', 'div.checkbox'):
+                    try:
+                        cb = fr.locator(sel)
+                        if await cb.count() > 0:
+                            await cb.first.click(timeout=6000)
+                            done = True
+                            break
+                    except Exception:
+                        pass
+                if not done:
+                    # 坐标兜底：截图里方框在 (513,437)
+                    try:
+                        await page.mouse.click(513, 437)
+                        done = True
+                    except Exception:
+                        pass
+                print(f"   {tag}点了我 am human ->", done, flush=True)
+                await page.wait_for_timeout(6000)
                 continue
             prompt = ""
             try:
