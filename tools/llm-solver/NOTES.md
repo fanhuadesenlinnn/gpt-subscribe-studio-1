@@ -331,3 +331,36 @@ for i in range(await cb.count()):
 ```
 
 州同理：找文本含 "State" 的那个 combobox。
+
+## 第 32 轮：文本匹配也没找到账单国家
+
+```
+已填字段: ['email','phone','tos','number','expiry','cvc','name']
+（没有打印"已选账单国家"，说明遍历 [role=combobox] 没找到文本含 Afghanistan 的元素）
+```
+
+说明账单国家那个下拉**不是 `[role="combobox"]`**，也不是 `button[aria-haspopup]`。
+
+### 下一轮先做元素勘查（不要再猜）
+
+在填完卡之后，dump 一次账单地址区域的所有可交互元素：
+
+```python
+info = await fr.evaluate("""() => {
+  const out = [];
+  const root = [...document.querySelectorAll('*')]
+    .find(e => (e.innerText||'').trim().startsWith('Billing address'));
+  if (!root) return out;
+  const box = root.closest('div') || root;
+  box.querySelectorAll('input,select,button,[role],div[tabindex]').forEach(e => {
+    out.push({tag:e.tagName, role:e.getAttribute('role'), name:e.getAttribute('name'),
+              ac:e.getAttribute('autocomplete'), type:e.type||'',
+              txt:(e.innerText||'').slice(0,30), aria:e.getAttribute('aria-label')||''});
+  });
+  return out;
+}""")
+```
+
+拿到真实结构后再写选择器。第 30 轮能成功是因为当时页面上
+"Afghanistan" 恰好在某个 combobox 的 innerText 里，但这次没有 —— 结构不稳定，
+必须看清再写。

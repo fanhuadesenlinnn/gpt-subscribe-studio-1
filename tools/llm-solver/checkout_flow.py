@@ -222,73 +222,41 @@ async def fill_stripe_fields(page, card, email="buyer@example.com"):
     ):
         ok = await try_fill(sels, val, lab)
         if not ok and lab == "postal":
-            # 账单国家是自定义下拉：点开 → 输入过滤 → 回车
             done_cc = False
             for fr in frames:
-                for sel in ('[role="combobox"]', 'button[aria-haspopup="listbox"]',
-                            'text=Afghanistan'):
+                if done_cc:
+                    break
+                for sel in ('[role="combobox"]', 'button[aria-haspopup="listbox"]'):
                     if done_cc:
                         break
                     try:
-                        loc = fr.locator(sel)
-                        cnt = await loc.count()
+                        cnt = await fr.locator(sel).count()
                     except Exception:
                         cnt = 0
-                    for i in range(min(cnt, 6)):
+                    for i in range(cnt):
                         try:
-                            el = loc.nth(i)
+                            el = fr.locator(sel).nth(i)
                             txt = (await el.inner_text(timeout=2000)) or ""
-                            if "Afghanistan" not in txt and "listbox" not in sel and "combobox" not in sel:
-                                continue
+                        except Exception:
+                            continue
+                        if "Afghanistan" not in txt:
+                            continue
+                        try:
                             await el.click(timeout=4000)
-                            await page.wait_for_timeout(900)
-                            await page.keyboard.type("United States", delay=40)
+                            await page.wait_for_timeout(800)
+                            await page.keyboard.type("United States", delay=45)
                             await page.wait_for_timeout(900)
                             await page.keyboard.press("Enter")
                             await page.wait_for_timeout(1800)
                             done_cc = True
-                            print("   已选账单国家（", sel, i, "）", flush=True)
-                            break
+                            print("   已选账单国家（文本匹配 Afghanistan → US）", flush=True)
                         except Exception:
                             pass
+                        break
             if done_cc:
                 frames = await all_frames(page)
             ok = await try_fill(sels, val, lab)
-    # 账单州：原生 select 优先，否则 role=combobox
-    if "state" not in filled:
-        for fr in frames:
-            try:
-                sc = fr.locator('select[name="state"], select[autocomplete="address-level1"]')
-                if await sc.count() > 0:
-                    opts = await sc.first.locator("option").all_inner_texts()
-                    for cand in ("Oregon", "OR"):
-                        if any(cand.lower() in (o or "").lower() for o in opts):
-                            try:
-                                await sc.first.select_option(label=cand, timeout=3000)
-                            except Exception:
-                                await sc.first.select_option(cand, timeout=3000)
-                            filled.append("state")
-                            break
-                    break
-            except Exception:
-                pass
-    if "state" not in filled:
-        for fr in frames:
-            try:
-                cb = fr.locator('[role="combobox"]')
-                for i in range(await cb.count()):
-                    el = cb.nth(i)
-                    txt = (await el.inner_text(timeout=1500)) or ""
-                    if "State" in txt or "state" in txt:
-                        await el.click(timeout=4000)
-                        await page.wait_for_timeout(700)
-                        await page.keyboard.type("Oregon", delay=40)
-                        await page.wait_for_timeout(700)
-                        await page.keyboard.press("Enter")
-                        filled.append("state")
-                        break
-            except Exception:
-                pass
+
     return filled
 
 
