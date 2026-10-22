@@ -65,7 +65,7 @@ async def solve_in_browser(sitekey: str, rqdata: str, proxy: str, host: str) -> 
         reason: str = ""
 
     class PointAnswer(BaseModel):
-        points: List[List[float]] = []
+        cells: List[str] = []
         reason: str = ""
 
     llm = AnthropicCompatProvider(api_key=LLM_KEY, model=LLM_MODEL, base_url=LLM_BASE)
@@ -215,25 +215,8 @@ async def solve_in_browser(sitekey: str, rqdata: str, proxy: str, host: str) -> 
                     pass
             return False
 
-        for rnd in range(1, MAX_ROUNDS + 1):
-            try:
-                await page.frame_locator(
-                    'iframe[src*="frame=checkbox"]').locator("#checkbox").click(timeout=10000)
-                log(f"   [轮次{rnd}] 点了 checkbox")
-            except Exception as exc:  # noqa: BLE001
-                log(f"   [轮次{rnd}] checkbox: {str(exc)[:80]}")
-            await page.wait_for_timeout(4500)
-
-            token = await page.evaluate("window.__token || ''")
-            if token:
-                info["rounds"].append({"round": rnd, "pass": "checkbox"})
-                break
-
-            fr = await find_frame()
-            if not fr:
-                info["rounds"].append({"round": rnd, "error": "no_challenge_frame"})
-                continue
-
+        async def answer_one_page(fr) -> dict:
+            """答当前这一页（九宫格或点击题）。返回诊断信息。"""
             prompt = await fr.evaluate(
                 """() => {
                      const el = document.querySelector('.prompt-text')
@@ -241,125 +224,141 @@ async def solve_in_browser(sitekey: str, rqdata: str, proxy: str, host: str) -> 
                      return el ? el.innerText : document.body.innerText.slice(0, 200);
                    }""")
             prompt = " ".join(str(prompt).split())[:200]
-
             n = await cell_count(fr)
-            if n == 0:
-                # 点击题：读 canvas → LLM 给坐标 → 点
-                cv = await read_canvas(fr)
-                if not cv or not cv.get("jpg"):
-                    log(f"   [轮次{rnd}] 无 canvas，Skip：{prompt[:40]}")
-                    info["rounds"].append({"round": rnd, "error": "no_canvas"})
-                    await click_skip(fr)
-                    await page.wait_for_timeout(2000)
-                    continue
-                img = outdir / f"pt_{rnd}.jpg"
-                img.write_bytes(base64.b64decode(str(cv["jpg"]).split(",")[-1]))
-                bb = cv.get("bbox") or {"minX": 0, "minY": 0,
-                                        "w": cv["W"], "h": cv["H"]}
+            res: Dict[str, Any] = {"prompt": prompt[:80], "cells": n}
+
+            if n > 0:
+                # ── 九宫格 ──
+                cells = fr.locator('div[role=button][aria-label*="Challenge Image"]')
+                tiles = []
+                for i in range(min(n, 9)):
+                    fp = outdir / f"t{i}.png"
+                    try:
+                        await cells.nth(i).screenshot(path=str(fp), timeout=6000)
+                        tiles.append(fp)
+                    except Exception:
+                        tiles.append(None)
+                if not any(tiles):
+                    res["error"] = "no_tiles"
+                    return res
                 try:
-                    pans = await llm.generate_with_images(
-                        images=[img],
-                        response_schema=PointAnswer,
-                        user_prompt=(f"题目：{prompt}\n"
-                                     f"图片宽 {bb['w']} 像素、高 {bb['h']} 像素。\n"
-                                     "请给出所有应该点击的位置，用**像素坐标** [x, y]"
-                                     f"（x 范围 0-{bb['w']}，y 范围 0-{bb['h']}），"
-                                     "点在目标物体的中心。可以有多个。"),
-                        description="你是精确的空间坐标作答助手。先仔细看图定位目标，"
-                                    "再换算成像素坐标。只输出 JSON。",
+                    ans = await llm.generate_with_images(
+                        images=[t for t in tiles if t],
+                        response_schema=GridAnswer,
+                        user_prompt=(f"题目：{prompt}\n下面是九宫格 9 张图，索引 0-8 按从左到右、"
+                                     "从上到下排列。请选出所有符合题意的格子索引。"),
+                        description="你是精确的图像选择题作答助手，只输出 JSON。",
                     )
                 except Exception as exc:  # noqa: BLE001
-                    log(f"   [轮次{rnd}] LLM 失败：{str(exc)[:90]}")
-                    info["rounds"].append({"round": rnd, "error": f"llm:{str(exc)[:70]}"})
-                    continue
-                log(f"   [轮次{rnd}] 点击题 LLM 给 {len(pans.points)} 个点：{pans.reason[:50]}")
-                rect = cv["rect"]
+                    res["error"] = f"llm:{str(exc)[:70]}"
+                    return res
+                boxes = await fr.evaluate(
+                    """() => [...document.querySelectorAll('div[role=button][aria-label*="Challenge Image"]')]
+                         .map((d, i) => { const r = d.getBoundingClientRect();
+                           return { i, x: r.x + r.width/2, y: r.y + r.height/2 }; })""")
+                boxes = sorted(boxes, key=lambda b: (round(b["y"] / 20), b["x"]))
                 fb = await frame_box(fr) or {"x": 0, "y": 0}
-                log(f"   [轮次{rnd}] iframe 偏移 ({round(fb['x'])},{round(fb['y'])})")
-                for pt in pans.points[:6]:
-                    try:
-                        nx, ny = float(pt[0]), float(pt[1])
-                    except Exception:
-                        continue
-                    # LLM 给的是像素坐标（相对裁剪图）
-                    px_in = nx if nx > 1.5 else nx * bb["w"]
-                    py_in = ny if ny > 1.5 else ny * bb["h"]
-                    px_in = max(0.0, min(px_in, bb["w"] - 1))
-                    py_in = max(0.0, min(py_in, bb["h"] - 1))
-                    cx = (bb["minX"] + px_in) / cv["W"]
-                    cy = (bb["minY"] + py_in) / cv["H"]
-                    px = fb["x"] + rect["x"] + cx * rect["w"]
-                    py = fb["y"] + rect["y"] + cy * rect["h"]
-                    try:
-                        await page.mouse.click(px, py)
-                    except Exception:
-                        pass
-                    await page.wait_for_timeout(450)
-                await page.wait_for_timeout(1000)
-                try:
-                    await page.screenshot(path=f"/tmp/hc_svc_pt_{rnd}.png")
-                except Exception:
-                    pass
-                submitted2 = await click_submit(fr)
-                await page.wait_for_timeout(4200)
-                token = await page.evaluate("window.__token || ''")
-                info["rounds"].append({"round": rnd, "kind": "point", "prompt": prompt[:70],
-                                       "points": pans.points[:6], "submit": submitted2,
-                                       "token": len(token)})
-                if token:
-                    break
-                await click_skip(fr)
-                await page.wait_for_timeout(2000)
-                continue
-            cells = fr.locator('div[role=button][aria-label*="Challenge Image"]')
-            tiles = []
-            for i in range(min(n, 9)):
-                fp = outdir / f"t{i}.png"
-                try:
-                    await cells.nth(i).screenshot(path=str(fp), timeout=6000)
-                    tiles.append(fp)
-                except Exception:
-                    tiles.append(None)
-            if not any(tiles):
-                info["rounds"].append({"round": rnd, "error": "no_tiles", "prompt": prompt})
-                continue
+                for idx in ans.indices:
+                    if 0 <= idx < len(boxes):
+                        await page.mouse.click(fb["x"] + boxes[idx]["x"],
+                                               fb["y"] + boxes[idx]["y"])
+                        await page.wait_for_timeout(420)
+                await page.wait_for_timeout(800)
+                res.update({"kind": "grid", "indices": ans.indices,
+                            "reason": ans.reason[:60]})
+                res["submit"] = await click_submit(fr)
+                return res
 
+            # ── 点击题 ──
+            cv = await read_canvas(fr)
+            if not cv or not cv.get("jpg"):
+                res["error"] = "no_canvas"
+                return res
+            img = outdir / f"pt_{abs(hash(prompt)) % 100000}.jpg"
+            img.write_bytes(base64.b64decode(str(cv["jpg"]).split(",")[-1]))
+            bb = cv.get("bbox") or {"minX": 0, "minY": 0, "w": cv["W"], "h": cv["H"]}
+            gimg, cw, ch, letters = grid_overlay(img, 10, 7)
             try:
-                ans = await llm.generate_with_images(
-                    images=[t for t in tiles if t],
-                    response_schema=GridAnswer,
-                    user_prompt=(f"题目：{prompt}\n下面是九宫格 9 张图，索引 0-8 按从左到右、"
-                                 "从上到下排列。请选出所有符合题意的格子索引。"),
-                    description="你是精确的图像选择题作答助手，只输出 JSON。",
+                pans = await llm.generate_with_images(
+                    images=[gimg],
+                    response_schema=PointAnswer,
+                    user_prompt=(f"题目：{prompt}\n"
+                                 "图中已叠加红色网格：列用字母 A-J 标注，行用数字 1-7 标注。\n"
+                                 "请找出所有符合题意的目标，回答它们所在的**格子编号**，"
+                                 '格式如 "C4"、"D5"。只回答格子编号，不要坐标。'),
+                    description="你是精确的图像定位助手。利用网格标签仔细核对目标所在格子。"
+                                "只输出 JSON。",
                 )
             except Exception as exc:  # noqa: BLE001
-                info["rounds"].append({"round": rnd, "error": f"llm:{str(exc)[:90]}",
-                                       "prompt": prompt})
-                continue
+                res["error"] = f"llm:{str(exc)[:70]}"
+                return res
+            rect = cv["rect"]
+            fb = await frame_box(fr) or {"x": 0, "y": 0}
+            px_list = []
+            for lab in pans.cells[:6]:
+                lab = str(lab).strip().upper()
+                m = re.match(r"^([A-Z])\s*-?\s*(\d{1,2})$", lab)
+                if not m or m.group(1) not in letters:
+                    continue
+                ci = letters.index(m.group(1))
+                ri = int(m.group(2)) - 1
+                if ri < 0 or ri > 6:
+                    continue
+                px_list.append(((ci + 0.5) * cw, (ri + 0.5) * ch))
+            for px_in, py_in in px_list:
+                px_in = max(0.0, min(px_in, bb["w"] - 1))
+                py_in = max(0.0, min(py_in, bb["h"] - 1))
+                cx = (bb["minX"] + px_in) / cv["W"]
+                cy = (bb["minY"] + py_in) / cv["H"]
+                await page.mouse.click(fb["x"] + rect["x"] + cx * rect["w"],
+                                       fb["y"] + rect["y"] + cy * rect["h"])
+                await page.wait_for_timeout(450)
+            await page.wait_for_timeout(800)
+            res.update({"kind": "point", "cells": pans.cells[:6],
+                        "reason": pans.reason[:60]})
+            res["submit"] = await click_submit(fr)
+            return res
 
-            boxes = await fr.evaluate(
-                """() => [...document.querySelectorAll('div[role=button][aria-label*="Challenge Image"]')]
-                     .map((d, i) => { const r = d.getBoundingClientRect();
-                       return { i, x: r.x + r.width/2, y: r.y + r.height/2 }; })""")
-            boxes = sorted(boxes, key=lambda b: (round(b["y"] / 20), b["x"]))
-            for idx in ans.indices:
-                if 0 <= idx < len(boxes):
-                    b = boxes[idx]
-                    try:
-                        await page.mouse.click(b["x"], b["y"])
-                    except Exception:
-                        pass
-                    await page.wait_for_timeout(420)
-            await page.wait_for_timeout(1000)
-
-            submitted = await click_submit(fr)
-            await page.wait_for_timeout(4200)
+        for rnd in range(1, MAX_ROUNDS + 1):
+            if not await find_frame():
+                try:
+                    await page.frame_locator(
+                        'iframe[src*="frame=checkbox"]').locator("#checkbox").click(timeout=10000)
+                    log(f"   [轮次{rnd}] 点了 checkbox")
+                except Exception as exc:  # noqa: BLE001
+                    log(f"   [轮次{rnd}] checkbox: {str(exc)[:60]}")
+                await page.wait_for_timeout(4500)
             token = await page.evaluate("window.__token || ''")
-            info["rounds"].append({"round": rnd, "prompt": prompt[:80],
-                                   "indices": ans.indices, "submit": submitted,
-                                   "token": len(token)})
             if token:
                 break
+
+            # 同一挑战最多答 3 页，答完不立刻 Skip
+            for pno in range(1, 4):
+                fr = await find_frame()
+                if not fr:
+                    break
+                try:
+                    res = await answer_one_page(fr)
+                except Exception as exc:  # noqa: BLE001
+                    res = {"error": f"exc:{str(exc)[:80]}"}
+                res.update({"round": rnd, "page": pno})
+                info["rounds"].append(res)
+                log(f"   [轮次{rnd}.{pno}] {res.get('kind', res.get('error'))} "
+                    f"submit={res.get('submit', '')} idx={res.get('indices')} "
+                    f"cells={res.get('cells')}")
+                await page.wait_for_timeout(4200)
+                token = await page.evaluate("window.__token || ''")
+                if token:
+                    break
+                if not await find_frame():
+                    break
+            if token:
+                break
+
+            fr2 = await find_frame()
+            if fr2:
+                await click_skip(fr2)
+                await page.wait_for_timeout(1800)
 
         try:
             await page.screenshot(path="/tmp/hc_svc_last.png")
