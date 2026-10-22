@@ -39,6 +39,8 @@ interface Props {
   checkoutUrl?: string | null;
   /** 从 accessToken 解析出的账户邮箱，用于预填账单邮箱 */
   sessionEmail?: string | null;
+  /** 订单是否带优惠活动：带的话浏览器 pm_ 要声明 allow_redisplay */
+  requireSaveChoice?: boolean;
   /** 取 pm_ 的方式；由上层持有，提链前就能选 */
   pmMode: "server" | "stripe";
   onPmMode?: (mode: "server" | "stripe") => void;
@@ -122,7 +124,7 @@ const STEPS = [
 
 export function ProtocolPayPanel({
   orderId, country, amount, currency, quotationError, exitLabel, sessionEmail,
-  publishableKey, pmMode, onPmMode,
+  publishableKey, pmMode, onPmMode, requireSaveChoice = false,
   checkoutUrl, disabled, onDone, onRefreshQuote,
 }: Props) {
   const [card, setCard] = useState<CardDraft>(EMPTY_CARD);
@@ -308,6 +310,7 @@ export function ProtocolPayPanel({
                 currency={currency}
                 checkoutUrl={checkoutUrl}
                 requirePaymentMethod
+                requireSaveChoice={requireSaveChoice}
                 disabled={busy}
                 onReady={setStripeCard}
               />

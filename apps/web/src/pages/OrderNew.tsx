@@ -503,6 +503,7 @@ export function OrderNew({ onRecord }: Props) {
                 sessionEmail={order.session_email}
               pmMode={pmMode}
               onPmMode={setPmMode}
+              requireSaveChoice={Boolean(order.promo_campaign_id)}
                 country={order.billing_country || country}
                 amount={order.amount}
                 currency={order.currency}
