@@ -715,7 +715,9 @@ class StripeProtocol:
             "challenge_response_token": token,
             "captcha_vendor_name": "hcaptcha",
             "key": PUBLISHABLE_KEY,
-            "_stripe_version": V_FULL,
+            # 挑战来自 hosted checkout（payment_pages/{cs}/confirm），
+            # 版本必须和该流程一致；用 V_FULL 会让 token 被判无效。
+            "_stripe_version": V_HOSTED,
         }
         # 真实浏览器把 hCaptcha 的 ekey 一起回传；有就必须带上
         if ekey:
