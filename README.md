@@ -644,4 +644,4 @@ confirm 请求里带一个 `rv_timestamp`：**212 字符**，字符集 43 个符
 
 ---
 
-欢迎加入群聊：https://t.me/TokenFlying
+欢迎加入群聊：[https://t.me/TokenFlying](https://t.me/+op8u6XEdswg0YTVh)
