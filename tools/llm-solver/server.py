@@ -29,6 +29,11 @@ LLM_BASE = os.environ.get("GSS_LLM_BASE_URL", "")
 LLM_KEY = os.environ.get("GSS_LLM_KEY", "")
 LLM_MODEL = os.environ.get("GSS_LLM_MODEL", "gemini-3.8-flash-high")
 MAX_ROUNDS = int(os.environ.get("GSS_LLM_MAX_ROUNDS", "3"))
+# 只答九宫格（准确率最高），点击/拖拽题直接 Skip 换题
+GRID_ONLY = (os.environ.get("GSS_LLM_GRID_ONLY", "0") == "1")
+# 打码服务（YesCaptcha 判题）优先，LLM 兜底
+CAPTCHA_KEY = os.environ.get("GSS_CAPTCHA_API_KEY", "")
+CAPTCHA_URL = os.environ.get("GSS_CAPTCHA_API_URL", "https://api.yescaptcha.com").rstrip("/")
 
 LOCK = threading.Lock()
 
@@ -51,6 +56,63 @@ def proxy_cfg(url: str) -> Optional[Dict[str, str]]:
         cfg["username"] = unquote(u.username)
         cfg["password"] = unquote(u.password or "")
     return cfg
+
+
+def grid_overlay(img_path: Path, cols: int = 10, rows: int = 7):
+    """在图上叠加带标签网格（列 A-J、行 1-7），让模型报格子编号。"""
+    from PIL import ImageDraw
+    im = Image.open(img_path).convert("RGB")
+    W, H = im.size
+    d = ImageDraw.Draw(im)
+    cw, ch = W / cols, H / rows
+    letters = "ABCDEFGHIJKLMNOP"
+    for c in range(cols):
+        x = c * cw
+        d.line([(x, 0), (x, H)], fill=(255, 40, 40), width=1)
+        if c < len(letters):
+            d.text((x + 2, 1), letters[c], fill=(255, 40, 40))
+    for r in range(rows):
+        y = r * ch
+        d.line([(0, y), (W, y)], fill=(255, 40, 40), width=1)
+        d.text((1, y + 1), str(r + 1), fill=(255, 40, 40))
+    out = img_path.with_name(img_path.stem + "_grid.jpg")
+    im.save(out, quality=93)
+    return out, cw, ch, letters
+
+
+async def classify_with_service(images_b64: List[str], question: str) -> Dict[str, Any]:
+    """调 YesCaptcha HCaptchaClassification。返回 {indices:[int]} 或 {boxes:[[x,y]]} 或 {error}。"""
+    if not CAPTCHA_KEY:
+        return {"error": "no_captcha_key"}
+    task: Dict[str, Any] = {"type": "HCaptchaClassification", "queries": images_b64}
+    if question:
+        task["question"] = question
+    try:
+        async with httpx.AsyncClient(timeout=90) as c:
+            r = await c.post(f"{CAPTCHA_URL}/createTask",
+                             json={"clientKey": CAPTCHA_KEY, "task": task})
+            j = r.json() or {}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"service:{str(exc)[:70]}"}
+    if j.get("errorId"):
+        return {"error": f"{j.get('errorCode')}:{str(j.get('errorDescription'))[:60]}"}
+    sol = j.get("solution") or {}
+    out: Dict[str, Any] = {}
+    if isinstance(sol.get("objects"), list):
+        out["indices"] = [i for i, v in enumerate(sol["objects"]) if v]
+    elif isinstance(sol.get("top_k"), list):
+        out["indices"] = [int(x) for x in sol["top_k"]]
+    if isinstance(sol.get("box"), list) and sol["box"]:
+        nums = []
+        for v in sol["box"]:
+            try:
+                nums.append(float(v))
+            except Exception:
+                pass
+        out["boxes"] = [[nums[i], nums[i + 1]] for i in range(0, len(nums) - 1, 2)]
+    if "indices" not in out and "boxes" not in out:
+        out["error"] = "empty_solution"
+    return out
 
 
 async def solve_in_browser(sitekey: str, rqdata: str, proxy: str, host: str) -> Dict[str, Any]:
@@ -241,14 +303,53 @@ async def solve_in_browser(sitekey: str, rqdata: str, proxy: str, host: str) -> 
                 if not any(tiles):
                     res["error"] = "no_tiles"
                     return res
+                real = [t for t in tiles if t]
+                svc = await classify_with_service(
+                    [base64.b64encode(Path(t).read_bytes()).decode() for t in real], prompt)
+                if svc.get("indices"):
+                    log(f"   打码服务判题：{svc['indices']}")
+                    res.update({"kind": "grid", "indices": svc["indices"],
+                                "by": "service", "reason": ""})
+                    boxes0 = await fr.evaluate(
+                        """() => [...document.querySelectorAll('div[role=button][aria-label*="Challenge Image"]')]
+                             .map((d, i) => { const r = d.getBoundingClientRect();
+                               return { i, x: r.x + r.width/2, y: r.y + r.height/2 }; })""")
+                    boxes0 = sorted(boxes0, key=lambda b: (round(b["y"] / 20), b["x"]))
+                    fb0 = await frame_box(fr) or {"x": 0, "y": 0}
+                    for idx in svc["indices"]:
+                        if 0 <= idx < len(boxes0):
+                            await page.mouse.click(fb0["x"] + boxes0[idx]["x"],
+                                                   fb0["y"] + boxes0[idx]["y"])
+                            await page.wait_for_timeout(420)
+                    await page.wait_for_timeout(800)
+                    res["submit"] = await click_submit(fr)
+                    return res
+                if svc.get("error") and svc["error"] != "empty_solution":
+                    log(f"   服务商不可用（{svc['error']}），改用 LLM")
                 try:
                     ans = await llm.generate_with_images(
-                        images=[t for t in tiles if t],
+                        images=real,
                         response_schema=GridAnswer,
                         user_prompt=(f"题目：{prompt}\n下面是九宫格 9 张图，索引 0-8 按从左到右、"
-                                     "从上到下排列。请选出所有符合题意的格子索引。"),
-                        description="你是精确的图像选择题作答助手，只输出 JSON。",
+                                     "从上到下排列。\n"
+                                     "**必须列出全部符合条件的格子**，这类题通常有 2-4 个答案，"
+                                     "漏选任何一个都算错。先逐格判断，再汇总。"),
+                        description="你是精确的图像选择题作答助手。只输出 JSON。",
                     )
+                    # 查漏：再问一遍是否还有遗漏
+                    chk = await llm.generate_with_images(
+                        images=real,
+                        response_schema=GridAnswer,
+                        user_prompt=(f"题目：{prompt}\n下面是九宫格 9 张图（索引 0-8）。\n"
+                                     f"上一次的判断结果只选了 {ans.indices}。\n"
+                                     "请重新逐格核对：还有哪些格子也符合题意但被漏掉了？\n"
+                                     "只回答**漏掉的**索引；若没有遗漏，返回空数组。"),
+                        description="你是严格的复核员，专门找出被遗漏的选项。只输出 JSON。",
+                    )
+                    merged = list(dict.fromkeys(list(ans.indices) + list(chk.indices)))
+                    if chk.indices:
+                        log(f"   查漏补上 {chk.indices} → {merged}")
+                    ans.indices = merged
                 except Exception as exc:  # noqa: BLE001
                     res["error"] = f"llm:{str(exc)[:70]}"
                     return res
@@ -270,6 +371,10 @@ async def solve_in_browser(sitekey: str, rqdata: str, proxy: str, host: str) -> 
                 return res
 
             # ── 点击题 ──
+            if GRID_ONLY:
+                res["error"] = "skip_non_grid"
+                res["skip"] = True
+                return res
             cv = await read_canvas(fr)
             if not cv or not cv.get("jpg"):
                 res["error"] = "no_canvas"
@@ -349,6 +454,8 @@ async def solve_in_browser(sitekey: str, rqdata: str, proxy: str, host: str) -> 
                 await page.wait_for_timeout(4200)
                 token = await page.evaluate("window.__token || ''")
                 if token:
+                    break
+                if res.get("skip"):
                     break
                 if not await find_frame():
                     break
