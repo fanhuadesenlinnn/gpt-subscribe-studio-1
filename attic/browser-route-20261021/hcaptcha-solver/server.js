@@ -1591,7 +1591,7 @@ class Session {
    */
   /** 在挑战 canvas 上执行一次拖拽。start/end 为 canvas 归一化坐标。 */
   async dragOnCanvas(startNorm, endNorm) {
-    const frameEl = await this.page.$('iframe[src*="frame=challenge"]');
+    const frameEl = await this.visibleChallengeEl();
     if (!frameEl) return { error: 'no_challenge_iframe' };
     const box = await frameEl.boundingBox();
     if (!box) return { error: 'no_iframe_box' };
@@ -1633,8 +1633,28 @@ class Session {
              end: [Math.round(ex), Math.round(ey)], steps };
   }
 
+  /**
+   * 选「可见的」challenge iframe。
+   * hCaptcha 会先放一个 display:none 的空壳 iframe，page.$ 取第一个会拿到它，
+   * boundingBox 于是是 0×0 或 y=-9999，所有点击都落到视口外。
+   */
+  async visibleChallengeEl() {
+    const els = await this.page.$$('iframe[src*="frame=challenge"]');
+    let best = null;
+    let bestArea = 0;
+    for (const el of els) {
+      try {
+        const b = await el.boundingBox();
+        if (!b || b.width < 50 || b.height < 50) continue;
+        const area = b.width * b.height;
+        if (area > bestArea) { bestArea = area; best = el; }
+      } catch (_) {}
+    }
+    return best;
+  }
+
   async answerChallengeAt(coords) {
-    const frameEl = await this.page.$('iframe[src*="frame=challenge"]');
+    const frameEl = await this.visibleChallengeEl();
     if (!frameEl) return { error: 'no_challenge_iframe' };
     const box = await frameEl.boundingBox();
     if (!box) return { error: 'no_iframe_box' };
@@ -1685,7 +1705,7 @@ class Session {
    * 用于 9 宫格题：格子不是 button 元素、也没有 canvas 时按比例定位。
    */
   async clickInFrame(coords) {
-    const frameEl = await this.page.$('iframe[src*="frame=challenge"]');
+    const frameEl = await this.visibleChallengeEl();
     if (!frameEl) return { error: 'no_challenge_iframe' };
     const box = await frameEl.boundingBox();
     if (!box) return { error: 'no_iframe_box' };
@@ -1706,7 +1726,7 @@ class Session {
 
   /** 按格子索引点击（0 基），点完提交。 */
   async answerChallenge(indices) {
-    const frameEl = await this.page.$('iframe[src*="frame=challenge"]');
+    const frameEl = await this.visibleChallengeEl();
     if (!frameEl) return { error: 'no_challenge_iframe' };
     const box = await frameEl.boundingBox();
     if (!box) return { error: 'no_iframe_box' };
@@ -1747,7 +1767,7 @@ class Session {
 
   /** 点 Verify / Submit 之类的提交按钮。 */
   async submitChallenge() {
-    const frameEl = await this.page.$('iframe[src*="frame=challenge"]');
+    const frameEl = await this.visibleChallengeEl();
     if (!frameEl) return { error: 'no_challenge_iframe' };
     const box = await frameEl.boundingBox();
     if (!box) return { error: 'no_box' };
@@ -2306,7 +2326,7 @@ const server = http.createServer(async (req, res) => {
                    desc: String(e).slice(0, 120), question };
         }
         try {
-          const el = await s.page.$('iframe[src*="frame=challenge"]');
+          const el = await s.visibleChallengeEl();
           if (el) {
             const bx = await el.boundingBox();
             if (bx) {
@@ -2353,7 +2373,7 @@ const server = http.createServer(async (req, res) => {
         const ch = solved.challenge || await s.captureChallenge().catch(() => null);
         let shot = null;
         try {
-          const el = await s.page.$('iframe[src*="frame=challenge"]');
+          const el = await s.visibleChallengeEl();
           if (el) {
             const bx = await el.boundingBox();
             if (bx) {
@@ -2435,7 +2455,7 @@ const server = http.createServer(async (req, res) => {
                          imgs: (ch && ch.imgs) || [], bgImages: (ch && ch.bgImages) || [] };
         // 同时把整个 challenge iframe 截图带回去，供外部视觉判断
         try {
-          const el = await s.page.$('iframe[src*="frame=challenge"]');
+          const el = await s.visibleChallengeEl();
           if (el) {
             const bx = await el.boundingBox();
             if (bx) {
@@ -2497,7 +2517,7 @@ const server = http.createServer(async (req, res) => {
       const b64 = await s.withLock(async () => {
         const what = (body && body.what) || 'challenge';
         if (what === 'challenge') {
-          const el = await s.page.$('iframe[src*="frame=challenge"]');
+          const el = await s.visibleChallengeEl();
           if (!el) return null;
           const box = await el.boundingBox();
           if (!box) return null;
@@ -2655,7 +2675,7 @@ const server = http.createServer(async (req, res) => {
           // 用 canvas 会让模型看不到例题缩略图，误判成 "black square"。
           if (true) {
             try {
-              const el = await s.page.$('iframe[src*="frame=challenge"]');
+              const el = await s.visibleChallengeEl();
               if (el) {
                 const bx = await el.boundingBox();
                 if (bx) {
@@ -2711,7 +2731,7 @@ const server = http.createServer(async (req, res) => {
           result.submit = await s.submitChallenge();
           // 点击后立刻截图，确认格子被选中（边框变色）
           try {
-            const el2 = await s.page.$('iframe[src*="frame=challenge"]');
+            const el2 = await s.visibleChallengeEl();
             if (el2) {
               const b2 = await el2.boundingBox();
               if (b2) {
