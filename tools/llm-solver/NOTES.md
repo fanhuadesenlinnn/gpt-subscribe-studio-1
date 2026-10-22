@@ -564,3 +564,31 @@ for _ in range(15):
         break
     await page.wait_for_timeout(2000)
 ```
+
+## 第 40 轮：挑战帧出现了，但 #checkbox 没找到
+
+```
+点开后 frame 数: 15
+已填字段: 11 项全部
+点击提交: button[type=submit]
+挑战帧已出现            ← 等待逻辑生效
+[0] 挑战处理: False     ← 但没有打印"点了 I am human"
+```
+
+说明：hcaptcha 帧存在，但里面的元素 id 不是 `#checkbox`。
+
+### 下一轮先 dump 挑战帧的 DOM
+
+```python
+for fr in frames:
+    if "hcaptcha" not in (fr.url or ""): continue
+    print(fr.url)
+    html = await fr.evaluate("() => document.body ? document.body.innerHTML.slice(0,600) : ''")
+    print(html)
+```
+
+看清楚 checkbox 的真实选择器（新版 hCaptcha 可能是
+`div[role=checkbox]`、`#checkbox` 或带 `.checkbox` class 的 div）。
+
+同时也可以直接用坐标点：截图里 checkbox 在 (513, 437)，页面坐标系
+和 viewport 一致，`page.mouse.click(513, 437)` 最直接。
