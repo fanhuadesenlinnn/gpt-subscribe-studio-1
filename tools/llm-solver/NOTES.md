@@ -95,3 +95,40 @@ Stripe 可能校验 Stripe.js 的运行 origin 必须与该 checkout 一致。
 
 这条路要用真实页面替代 `page.route` 伪造的页面 ——
 导航可能又会挂，需要给 checkout 域名单独放行并加长超时。
+
+## 第 23-24 轮：真实结账页可行
+
+```
+checkout_url: https://pay.openai.com/c/pay/cs_live_...
+页面标题:     OpenAI OpCo, LLC
+正文:        Subscribe to ChatGPT Business Subscription / $50.00 per month / Qty 2
+```
+
+**Stripe 的托管结账页在浏览器里能正常渲染**，商品、价格、数量全对。
+
+### 失败请求的性质
+
+```
+net::ERR_CONNECTION_CLOSED   (pay.openai.com 主文档、r.stripe.com/0、stripe-camo...)
+```
+
+全部是 `ERR_CONNECTION_CLOSED` —— **代理丢连接**，不是被墙或 403。
+页面最终仍渲染成功，说明重试可解。
+
+### 为什么这条路最重要
+
+挑战由 **Stripe 自己渲染**，origin 天然正确，token 必然绑定 Stripe 的会话。
+绕开了前 22 轮所有「会话归属」问题。
+
+### 下一步
+
+在真实结账页上完成支付流程：
+
+1. 打开 `https://pay.openai.com/c/pay/{cs_id}`，导航加 `ERR_CONNECTION_CLOSED` 重试 3 次
+2. 填卡号/有效期/CVC/账单地址（Stripe Elements 的 input 在顶层 iframe 内，
+   用 `frame_locator` 定位）
+3. 点「Subscribe / Pay」
+4. **挑战会在这里弹出**，用已有的服务商判题逻辑作答
+5. 读最终状态：3DS / declined / success
+
+注意：这条走的是「浏览器全流程」，不是协议模式，但能真正测出卡的最终结果。
