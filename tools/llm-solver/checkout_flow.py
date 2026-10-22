@@ -216,9 +216,33 @@ async def fill_stripe_fields(page, card, email="buyer@example.com"):
         (['input[name="number"]', 'input[autocomplete="cc-number"]'], card["number"], "number"),
         (['input[name="expiry"]', 'input[autocomplete="cc-exp"]'], exp, "expiry"),
         (['input[name="cvc"]', 'input[autocomplete="cc-csc"]'], card["cvc"], "cvc"),
+        (['input[name="name"]', 'input[autocomplete="cc-name"]'], "FIXTURE HOLDER", "name"),
         (['input[name="postal"]', 'input[autocomplete="postal-code"]'], "97211", "postal"),
     ):
         ok = await try_fill(sels, val, lab)
+        if not ok and lab == "postal":
+            # 账单国家必须选成 US，邮编框才会渲染
+            for fr in frames:
+                try:
+                    n = await fr.locator("select").count()
+                except Exception:
+                    n = 0
+                for i in range(n):
+                    try:
+                        sel_c = fr.locator("select").nth(i)
+                        opts = await sel_c.locator("option").all_inner_texts()
+                        joined = " ".join(opts)
+                        if "United States" in joined or "US" in opts:
+                            try:
+                                await sel_c.select_option(label="United States", timeout=4000)
+                            except Exception:
+                                await sel_c.select_option("US", timeout=4000)
+                            print("   已选国家 United States（frame 内第", i, "个 select）", flush=True)
+                            await page.wait_for_timeout(2000)
+                            break
+                    except Exception:
+                        pass
+            ok = await try_fill(sels, val, lab)
         if not ok:
             print("   未找到:", lab, flush=True)
     return filled

@@ -246,3 +246,27 @@ Billing address   （Country / 邮编）
 ```
 
 填完这两项 + 点 Subscribe，挑战就会弹出。
+
+## 第 29 轮：7/8 字段填上，只差账单地址
+
+```
+已填字段: ['email','phone','tos','number','expiry','cvc','name']
+未找到:   postal
+```
+
+### 踩的坑
+
+`select_option("United States")` 命中了**电话国家码**那个 select，
+不是**账单国家**。页面仍显示 `Billing address Afghanistan`。
+
+账单国家下拉看起来是**自定义组件**（不是原生 `<select>`），
+页面正文里出现 "Afghanistan Åland Isla..." 说明它是渲染成文本列表的 listbox。
+
+### 下一轮做法
+
+账单地址那一段要么：
+1. 用 `[role="combobox"]` / `[role="listbox"]` 定位并点选 "United States"
+2. 或直接点国家那一行 → 在弹出的列表里输入 "United" 过滤 → 回车
+3. 国家选好后邮编框（`input[name="postal"]`）才渲染，再填 97211
+
+填完就能点 Subscribe。
