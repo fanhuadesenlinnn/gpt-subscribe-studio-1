@@ -11,6 +11,7 @@ import asyncio
 import base64
 import json
 import os
+import httpx
 import re
 import sys
 import threading
@@ -387,6 +388,8 @@ async def solve_in_browser(sitekey: str, rqdata: str, proxy: str, host: str) -> 
             # 打码服务优先：它返回的 box 是上传图的像素坐标，实测对点击题很准
             svc = await classify_with_service(
                 [base64.b64encode(img.read_bytes()).decode()], prompt)
+            log(f"   服务商返回: {list(svc.keys())} "
+                f"boxes={len(svc.get('boxes') or [])} err={svc.get('error')}")
             if svc.get("boxes"):
                 rect0 = cv["rect"]
                 fb0 = await frame_box(fr) or {"x": 0, "y": 0}
