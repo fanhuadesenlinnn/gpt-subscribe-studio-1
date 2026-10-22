@@ -126,7 +126,7 @@ async def main():
         print("未命中挑战:", out.state)
         return
     cs = (body.get("payment_intent") or {}).get("client_secret") or sdk.get("client_secret") or ""
-    print("命中挑战，client_secret:", cs[:12], "len", len(cs))
+    print("命中挑战，client_secret:", cs[:12], "len", len(cs), flush=True)
 
     from playwright.async_api import async_playwright
     async with async_playwright() as p:
@@ -135,18 +135,45 @@ async def main():
                                           "--window-size=1280,980"])
         ctx = await b.new_context(proxy=proxy_cfg(proxy), viewport={"width": 1280, "height": 980})
         page = await ctx.new_page()
-        await page.goto("https://example.com", wait_until="domcontentloaded", timeout=45000)
-        await page.set_content(PAGE, wait_until="load")
-        await page.wait_for_timeout(2500)
 
-        await page.evaluate("([cs, pk]) => window.__run(cs, pk)", [cs, PUBLISHABLE_KEY])
-        print("已调用 handleNextAction")
+        # 用 route 直接返回主文档，跳过真实导航（真实导航经代理会挂死）
+        async def _route(route):
+            try:
+                req = route.request
+                if req.resource_type == "document":
+                    await route.fulfill(status=200, content_type="text/html; charset=utf-8",
+                                        body=PAGE)
+                else:
+                    await route.continue_()
+            except Exception:
+                try:
+                    await route.continue_()
+                except Exception:
+                    pass
+
+        await page.route("**/*", _route)
+        print("已装 route，开始导航…", flush=True)
+        await page.goto("https://example.com/", wait_until="domcontentloaded", timeout=25000)
+        print("主文档已就位", flush=True)
+        for _ in range(60):
+            if await page.evaluate("typeof window.Stripe === 'function'"):
+                break
+            await page.wait_for_timeout(500)
+        print("Stripe.js:", await page.evaluate("typeof window.Stripe"), flush=True)
+
+        print("调用 handleNextAction…", flush=True)
+        await page.evaluate("([cs, pk]) => { window.__run(cs, pk); return 'started'; }",
+                            [cs, PUBLISHABLE_KEY])
+        print("已调用 handleNextAction", flush=True)
         await page.wait_for_timeout(6000)
         print("状态:", await page.evaluate("JSON.stringify(window.__state)"))
 
         for rnd in range(1, 5):
-            frames = [f for f in page.frames if "hcaptcha" in (f.url or "")]
-            print(f"[{rnd}] iframe:", [f.url[:60] for f in frames])
+            allf = [f.url or "about:blank" for f in page.frames]
+            print(f"[{rnd}] 全部 frame({len(allf)}):", [u[:55] for u in allf], flush=True)
+            frames = [f for f in page.frames
+                      if any(k in (f.url or "") for k in ("hcaptcha", "hooks.stripe"))]
+            print(f"[{rnd}] 候选 iframe:", [f.url[:60] for f in frames], flush=True)
             got = False
             for fr in frames:
                 try:
