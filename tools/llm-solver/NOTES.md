@@ -270,3 +270,35 @@ Billing address   （Country / 邮编）
 3. 国家选好后邮编框（`input[name="postal"]`）才渲染，再填 97211
 
 填完就能点 Subscribe。
+
+## 第 30 轮：国家选成 US，只差 City / ZIP / State
+
+截图证据（/tmp/co_final.png）：
+```
+Card             02/29   135          ✓
+Cardholder name  FIXTURE HOLDER          ✓
+Billing address  United States (下拉)  ✓   ← role=combobox + 输入 + 回车 有效
+Address line 2   (Optional)
+City             [空]  ⊗              ← 必填
+ZIP              [空]  ⊗              ← 必填
+State            (下拉、必填)          ← 必填
+Save payment information  ☐
+PayPal  ○
+Phone            (503) 555-1234      ✓
+ToS              ☑                   ✓
+[ Subscribe ]
+```
+
+之前的 `select_option` 命中了电话国家码，这次改用 `[role="combobox"]` +
+`keyboard.type("United States")` + `Enter`，**国家选成功了**。
+
+### 下一轮只差三个字段
+
+```python
+fr.locator('input[name="city"]').fill("Portland")
+fr.locator('input[name="postal"]').fill("97211")
+fr.locator('select[name="state"]').select_option("OR")
+# 或 role=combobox 里选 Oregon
+```
+
+填完点 Subscribe → 挑战弹出 → 判题。

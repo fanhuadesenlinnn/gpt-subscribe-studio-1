@@ -221,30 +221,38 @@ async def fill_stripe_fields(page, card, email="buyer@example.com"):
     ):
         ok = await try_fill(sels, val, lab)
         if not ok and lab == "postal":
-            # 账单国家必须选成 US，邮编框才会渲染
+            # 账单国家是自定义下拉：点开 → 输入过滤 → 回车
+            done_cc = False
             for fr in frames:
-                try:
-                    n = await fr.locator("select").count()
-                except Exception:
-                    n = 0
-                for i in range(n):
+                for sel in ('[role="combobox"]', 'button[aria-haspopup="listbox"]',
+                            'text=Afghanistan'):
+                    if done_cc:
+                        break
                     try:
-                        sel_c = fr.locator("select").nth(i)
-                        opts = await sel_c.locator("option").all_inner_texts()
-                        joined = " ".join(opts)
-                        if "United States" in joined or "US" in opts:
-                            try:
-                                await sel_c.select_option(label="United States", timeout=4000)
-                            except Exception:
-                                await sel_c.select_option("US", timeout=4000)
-                            print("   已选国家 United States（frame 内第", i, "个 select）", flush=True)
-                            await page.wait_for_timeout(2000)
-                            break
+                        loc = fr.locator(sel)
+                        cnt = await loc.count()
                     except Exception:
-                        pass
+                        cnt = 0
+                    for i in range(min(cnt, 6)):
+                        try:
+                            el = loc.nth(i)
+                            txt = (await el.inner_text(timeout=2000)) or ""
+                            if "Afghanistan" not in txt and "listbox" not in sel and "combobox" not in sel:
+                                continue
+                            await el.click(timeout=4000)
+                            await page.wait_for_timeout(900)
+                            await page.keyboard.type("United States", delay=40)
+                            await page.wait_for_timeout(900)
+                            await page.keyboard.press("Enter")
+                            await page.wait_for_timeout(1800)
+                            done_cc = True
+                            print("   已选账单国家（", sel, i, "）", flush=True)
+                            break
+                        except Exception:
+                            pass
+            if done_cc:
+                frames = await all_frames(page)
             ok = await try_fill(sels, val, lab)
-        if not ok:
-            print("   未找到:", lab, flush=True)
     return filled
 
 
