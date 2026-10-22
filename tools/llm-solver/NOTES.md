@@ -62,3 +62,36 @@ GSS_LLM_SOLVER_URL=http://127.0.0.1:8197
    —— 但 Stripe.js 需要 hcaptcha/stripe 的 iframe 能加载，
    所以 origin 需要是真实域名，可用 `route()` 拦截任意域名返回我们的 HTML
 4. 每步都 print + `python -u`，避免再被缓冲坑掉
+
+## 第 21 轮：handleNextAction 渲染出哪些 frame
+
+```
+[1] 全部 frame(8):
+  https://example.com/                              ← 我们的页面
+  https://js.stripe.com/v3/controller-with-preconnect-014...
+  https://js.stripe.com/v3/m-outer-...  ×4           ← Stripe 的 iframe
+  about:blank ×2
+```
+
+**没有 hcaptcha 挑战 iframe。**
+
+说明：`handleNextAction` 在 `example.com` 这个 origin 上跑时，
+Stripe 的 controller 起来了（有 4 个 m-outer iframe），但**没有渲染挑战**。
+
+## 推断
+
+PI 是从 **hosted checkout**（`pay.tokenfly.shop`）创建的，
+Stripe 可能校验 Stripe.js 的运行 origin 必须与该 checkout 一致。
+在 `example.com` 上调 `handleNextAction` 拿不到挑战。
+
+## 下一步
+
+让 Stripe.js 跑在**真实 checkout 域名**上：
+
+1. 浏览器加载 `https://pay.<domain>/c/pay/<cs_id>`（真实 hosted checkout 页）
+2. 该页自己会调 Stripe.js 处理 `requires_action`
+3. 挑战 iframe 会在真实 origin 下渲染出来
+4. 我们在那里作答（判题逻辑已就绪）
+
+这条路要用真实页面替代 `page.route` 伪造的页面 ——
+导航可能又会挂，需要给 checkout 域名单独放行并加长超时。
