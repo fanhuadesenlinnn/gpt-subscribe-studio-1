@@ -31,6 +31,7 @@ LLM_MODEL = os.environ.get("GSS_LLM_MODEL", "gemini-3.8-flash-high")
 MAX_ROUNDS = int(os.environ.get("GSS_LLM_MAX_ROUNDS", "3"))
 # 只答九宫格（准确率最高），点击/拖拽题直接 Skip 换题
 GRID_ONLY = (os.environ.get("GSS_LLM_GRID_ONLY", "0") == "1")
+MAX_PAGES = int(os.environ.get("GSS_LLM_MAX_PAGES", "2"))
 # 打码服务（YesCaptcha 判题）优先，LLM 兜底
 CAPTCHA_KEY = os.environ.get("GSS_CAPTCHA_API_KEY", "")
 CAPTCHA_URL = os.environ.get("GSS_CAPTCHA_API_URL", "https://api.yescaptcha.com").rstrip("/")
@@ -438,7 +439,7 @@ async def solve_in_browser(sitekey: str, rqdata: str, proxy: str, host: str) -> 
                 break
 
             # 同一挑战最多答 3 页，答完不立刻 Skip
-            for pno in range(1, 4):
+            for pno in range(1, MAX_PAGES + 1):
                 fr = await find_frame()
                 if not fr:
                     break
