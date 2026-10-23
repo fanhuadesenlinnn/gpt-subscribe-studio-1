@@ -141,6 +141,23 @@ async def solve_hcaptcha(page, tag=""):
                     if v:
                         pts.append(((i % 3 + 0.5) * cv["W"] / 3,
                                     (i // 3 + 0.5) * cv["H"] / 3))
+            if not pts:
+                # 拖拽题/无法判题的题型 → Skip 换一道
+                skipped = False
+                for lab in ("Skip Challenge", "Skip"):
+                    try:
+                        bt = fr.locator(f"xpath=//*[starts-with(normalize-space(text()),'{lab}')]")
+                        if await bt.count() > 0:
+                            await bt.first.click(timeout=5000)
+                            skipped = True
+                            print(f"   {tag}已 Skip 换题", flush=True)
+                            break
+                    except Exception:
+                        pass
+                await page.wait_for_timeout(5000)
+                if skipped:
+                    continue
+
             for bx, by in pts[:6]:
                 px = rect["x"] + (bx / cv["W"]) * rect["w"]
                 py = rect["y"] + (by / cv["H"]) * rect["h"]
