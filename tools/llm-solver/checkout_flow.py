@@ -84,22 +84,19 @@ async def challenge_open(page):
             continue
         if any(k in t for k in keys):
             return True
-        # 只认「可见」的九宫格 / canvas（隐藏的旧元素会让循环永远等下去）
+        # 判据：题面元素可见（最可靠，只有真出题时才有），或 canvas 尺寸够大。
+        # 不能用 div[role=button] 计数 —— Skip/Refresh/菜单也是这类元素且常驻可见。
         try:
-            _tiles = fr.locator('div[role="button"]')
-            _n = await _tiles.count()
-            for _i in range(min(_n, 12)):
-                try:
-                    if await _tiles.nth(_i).is_visible():
-                        _bb = await _tiles.nth(_i).bounding_box()
-                        if _bb and _bb["width"] > 40 and _bb["height"] > 40:
-                            return True
-                except Exception:
-                    pass
+            _pe = fr.locator('.prompt-text, div[class*="prompt"]')
+            if await _pe.count() > 0 and await _pe.first.is_visible():
+                return True
+        except Exception:
+            pass
+        try:
             _cv = await fr.query_selector("canvas")
             if _cv is not None:
                 _cb = await _cv.bounding_box()
-                if _cb and _cb["width"] > 120 and _cb["height"] > 120:
+                if _cb and _cb["width"] > 200 and _cb["height"] > 150:
                     return True
         except Exception:
             pass
