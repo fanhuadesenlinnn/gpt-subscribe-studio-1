@@ -68,6 +68,7 @@ async def reason_drag(canvas_png: str, grid_png: str, prompt: str):
 
 async def solve_hcaptcha(page, tag=""):
     """canvas 版：元素截图（不受 CORS 影响）→ 打码服务 → 点击 → Verify。"""
+    clicked_once = False
     for rnd in range(12):
         hit = False
         cands = [f for f in page.frames if "hcaptcha" in (f.url or "")]
@@ -124,6 +125,11 @@ async def solve_hcaptcha(page, tag=""):
                 if cv is None:
                     continue
             if cv is None:
+                if clicked_once:
+                    # 已经点过一次方框，不再重复点击（重复点会触发风控，挑战不再渲染）
+                    await page.wait_for_timeout(3000)
+                    continue
+                clicked_once = True
                 clicked = False
                 for sel in ('#checkbox', '[role="checkbox"]', 'div.checkbox'):
                     try:
