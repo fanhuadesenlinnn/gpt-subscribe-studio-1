@@ -142,9 +142,29 @@ async def solve_hcaptcha(page, tag=""):
                         pass
                 if not clicked:
                     # 真实指针序列：逐步移动 + 按下/抬起（合成 click 容易被判可疑）
+                    # 首选：在 hcaptcha-inner 全屏 frame 内用元素定位点方框
+                    inner = [f for f in page.frames if "hcaptcha-inner" in (f.url or "")]
+                    for ifr in inner:
+                        for sel0 in ('#checkbox', '[role="checkbox"]',
+                                     'div.checkbox', '.checkbox'):
+                            try:
+                                cb0 = ifr.locator(sel0)
+                                if await cb0.count() > 0:
+                                    await cb0.first.click(timeout=6000)
+                                    clicked = True
+                                    print(f"   {tag}已点 inner 内的 {sel0}", flush=True)
+                                    break
+                            except Exception:
+                                pass
+                        if clicked:
+                            break
                     try:
                         # 从 checkbox iframe 的真实位置算中心点（硬编码坐标会因页面滚动而落空）
                         tx, ty = 513, 437
+                        if not clicked:
+                            print(f"   {tag}=== page.frames ({len(page.frames)}) ===", flush=True)
+                            for i3, fr3 in enumerate(page.frames):
+                                print(f"      [{i3}] {(fr3.url or 'about:blank')[:95]}", flush=True)
                         for el2 in await page.query_selector_all("iframe"):
                             src2 = (await el2.get_attribute("src")) or ""
                             if "frame=checkbox" in src2:
@@ -156,7 +176,7 @@ async def solve_hcaptcha(page, tag=""):
                                 break
                         await page.mouse.move(400, 300)
                         await page.wait_for_timeout(120)
-                        for k in range(1, 9):
+                        for k in range(1, 9) if not clicked else range(0):
                             await page.mouse.move(400 + (tx - 400) * k / 8,
                                                   300 + (ty - 300) * k / 8)
                             await page.wait_for_timeout(35)
@@ -221,6 +241,27 @@ async def solve_hcaptcha(page, tag=""):
                         outd = await reason_drag(cv["path"], g, prompt)
                         d = outd.model_dump()
                         print(f"   {tag}拖拽路径: {json.dumps(d, ensure_ascii=False)[:220]}", flush=True)
+                        rectd = cv["rect"]
+                        for path in (d.get("paths") or [])[:2]:
+                            sp = path.get("start_point") or {}
+                            ep = path.get("end_point") or {}
+                            sx = rectd["x"] + float(sp.get("x", 0)) / cv["W"] * rectd["w"]
+                            sy = rectd["y"] + float(sp.get("y", 0)) / cv["H"] * rectd["h"]
+                            ex = rectd["x"] + float(ep.get("x", 0)) / cv["W"] * rectd["w"]
+                            ey = rectd["y"] + float(ep.get("y", 0)) / cv["H"] * rectd["h"]
+                            await page.mouse.move(sx, sy)
+                            await page.wait_for_timeout(200)
+                            await page.mouse.down()
+                            await page.wait_for_timeout(150)
+                            for k2 in range(1, 13):
+                                await page.mouse.move(sx + (ex - sx) * k2 / 12,
+                                                      sy + (ey - sy) * k2 / 12)
+                                await page.wait_for_timeout(35)
+                            await page.wait_for_timeout(150)
+                            await page.mouse.up()
+                            print(f"   {tag}已拖拽 ({round(sx)},{round(sy)}) -> ({round(ex)},{round(ey)})", flush=True)
+                            await page.wait_for_timeout(1200)
+                        pts = [1]
                     except Exception as exc:
                         print(f"   {tag}拖拽求解失败:", str(exc)[:90], flush=True)
 
