@@ -799,10 +799,19 @@ async def main():
     auth = json.loads(Path("/opt/gss/config/container-auth.json").read_text())
     env = load_env("/opt/gss/app/cards.env")
     ats = json.load(open("/opt/gss/data/at_list.json"))
-    _k = os.environ.get("GSS_CARD", "A").upper()
-    card = {"number": env[f"CARD_{_k}_NUMBER"], "exp_month": env[f"CARD_{_k}_EXP_MONTH"],
-            "exp_year": env[f"CARD_{_k}_EXP_YEAR"], "cvc": env[f"CARD_{_k}_CVC"]}
-    print(f"使用卡: CARD_{_k} ****{card['number'][-4:]}", flush=True)
+    _cf = os.environ.get("GSS_CARD_FILE", "")
+    if _cf and Path(_cf).exists():
+        _lines = [l.strip() for l in Path(_cf).read_text().splitlines() if l.strip()]
+        _pick = random.choice(_lines).split("|")
+        _mm, _yy = _pick[1].split("/")
+        card = {"number": _pick[0], "exp_month": _mm.lstrip("0") or "1",
+                "exp_year": _yy, "cvc": _pick[2]}
+        print(f"卡池 {len(_lines)} 张，随机选 ****{card['number'][-4:]}", flush=True)
+    else:
+        _k = os.environ.get("GSS_CARD", "A").upper()
+        card = {"number": env[f"CARD_{_k}_NUMBER"], "exp_month": env[f"CARD_{_k}_EXP_MONTH"],
+                "exp_year": env[f"CARD_{_k}_EXP_YEAR"], "cvc": env[f"CARD_{_k}_CVC"]}
+        print(f"使用卡: CARD_{_k} ****{card['number'][-4:]}", flush=True)
 
     d = None
     random_start = random.randrange(max(1, len(ats)))
