@@ -97,7 +97,8 @@ async def page_state(page):
 async def solve_hcaptcha(page, tag=""):
     """canvas 版：元素截图（不受 CORS 影响）→ 打码服务 → 点击 → Verify。"""
     clicked_once = False
-    for rnd in range(12):
+    submitted_any = False
+    for rnd in range(14):
         hit = False
         cands = [f for f in page.frames if "hcaptcha" in (f.url or "")]
         if not cands:
@@ -136,8 +137,8 @@ async def solve_hcaptcha(page, tag=""):
                 if st2 != "none":
                     print(f"   {tag}★ 页面已推进: {st2}", flush=True)
                     return True
-                # 后续轮次：轮询等新题目图渲染（Skip 后挑战要重新布局）
-                for _w in range(10):
+                # 后续轮次：轮询等新题目图渲染（每页都要等，约 60 秒）
+                for _w in range(30):
                     try:
                         el2 = await fr.query_selector("canvas")
                         if el2 is not None:
@@ -154,13 +155,20 @@ async def solve_hcaptcha(page, tag=""):
                     except Exception:
                         pass
                     await page.wait_for_timeout(2000)
-                if cv is None:
-                    continue
+                    if _w and _w % 10 == 0:
+                        print(f"   {tag}等第二页… {_w*2}s", flush=True)
+                # 轮询失败不再 continue —— 落到下面的点击分支，允许重置后再点方框
             if cv is None:
-                if clicked_once:
-                    # 已经点过一次方框，不再重复点击（重复点会触发风控，挑战不再渲染）
-                    await page.wait_for_timeout(3000)
-                    continue
+                if clicked_once or submitted_any:
+                    # 等太久还没有题目图 → hCaptcha 可能已重置回方框状态，允许再点一次
+                    if rnd >= 2:
+                        print(f"   {tag}长时间无题，重新点一次方框", flush=True)
+                        clicked_once = False
+                        submitted_any = False
+                        await page.wait_for_timeout(1000)
+                    else:
+                        await page.wait_for_timeout(3000)
+                        continue
                 clicked_once = True
                 clicked = False
                 for sel in ('#checkbox', '[role="checkbox"]', 'div.checkbox'):
@@ -362,14 +370,32 @@ async def solve_hcaptcha(page, tag=""):
                         await bt.first.click(timeout=5000)
                         print(f"   {tag}提交 [{txt2[:24]}]", flush=True)
                         hit = True
+                        submitted_any = True
                         break
                 except Exception:
                     pass
             if hit:
-                break
-        await page.wait_for_timeout(5000)
-        if hit:
-            return True
+                # 已提交一页，检查是否还有下一页；有就继续，没有才返回
+                await page.wait_for_timeout(5000)
+                st3 = await page_state(page)
+                if st3 != "none":
+                    print(f"   {tag}★ 页面已推进: {st3}", flush=True)
+                    return True
+                try:
+                    await page.screenshot(path=f"/tmp/after_submit_{rnd}.png")
+                    bnow = (await page.inner_text("body"))[:300].replace("\n", " ")
+                    print(f"   {tag}提交后页面: {bnow[:180]}", flush=True)
+                    hcnow = [f.url[:50] for f in page.frames if "hcaptcha" in (f.url or "")]
+                    print(f"   {tag}提交后 hcaptcha 帧: {len(hcnow)}", flush=True)
+                except Exception:
+                    pass
+                still = [f for f in page.frames if "hcaptcha" in (f.url or "")]
+                if still:
+                    hit = False
+                    print(f"   {tag}提交后仍有挑战帧，继续下一页", flush=True)
+                    continue
+                return True
+        await page.wait_for_timeout(3000)
     return False
 
 
