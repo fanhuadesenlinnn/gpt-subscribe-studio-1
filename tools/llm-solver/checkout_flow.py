@@ -42,6 +42,30 @@ def proxy_cfg(url):
     return c
 
 
+
+def make_grid(png: str, w: int, h: int) -> str:
+    """用 challenger 的 create_coordinate_grid 生成带坐标轴的网格图。"""
+    try:
+        import cv2
+        from hcaptcha_challenger.helper import create_coordinate_grid
+        arr = create_coordinate_grid(png, (0, 0, float(w), float(h)))
+        out = "/tmp/co_grid.png"
+        cv2.imwrite(out, arr)
+        return out
+    except Exception as exc:
+        print("   网格生成失败:", str(exc)[:80], flush=True)
+        return ""
+
+
+async def reason_drag(canvas_png: str, grid_png: str, prompt: str):
+    """调 challenger 的 SpatialPathReasoner 解拖拽题。"""
+    from hcaptcha_challenger.tools.spatial.path import SpatialPathReasoner
+    r = SpatialPathReasoner(gemini_api_key="x")
+    out = await r(challenge_screenshot=canvas_png, grid_divisions=grid_png,
+                  auxiliary_information=prompt)
+    return out
+
+
 async def solve_hcaptcha(page, tag=""):
     """canvas 版：元素截图（不受 CORS 影响）→ 打码服务 → 点击 → Verify。"""
     for rnd in range(12):
@@ -174,6 +198,16 @@ async def solve_hcaptcha(page, tag=""):
                     if v:
                         pts.append(((i % 3 + 0.5) * cv["W"] / 3,
                                     (i // 3 + 0.5) * cv["H"] / 3))
+            if not pts and "drag" in prompt.lower():
+                g = make_grid(cv["path"], cv["W"], cv["H"])
+                if g:
+                    try:
+                        outd = await reason_drag(cv["path"], g, prompt)
+                        d = outd.model_dump()
+                        print(f"   {tag}拖拽路径: {json.dumps(d, ensure_ascii=False)[:220]}", flush=True)
+                    except Exception as exc:
+                        print(f"   {tag}拖拽求解失败:", str(exc)[:90], flush=True)
+
             if not pts:
                 # 拖拽题/无法判题的题型 → Skip 换一道
                 skipped = False
