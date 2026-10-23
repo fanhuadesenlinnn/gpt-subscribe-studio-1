@@ -802,8 +802,10 @@ async def main():
     auth = json.loads(Path("/opt/gss/config/container-auth.json").read_text())
     env = load_env("/opt/gss/app/cards.env")
     ats = json.load(open("/opt/gss/data/at_list.json"))
-    card = {"number": env["CARD_A_NUMBER"], "exp_month": env["CARD_A_EXP_MONTH"],
-            "exp_year": env["CARD_A_EXP_YEAR"], "cvc": env["CARD_A_CVC"]}
+    _k = os.environ.get("GSS_CARD", "A").upper()
+    card = {"number": env[f"CARD_{_k}_NUMBER"], "exp_month": env[f"CARD_{_k}_EXP_MONTH"],
+            "exp_year": env[f"CARD_{_k}_EXP_YEAR"], "cvc": env[f"CARD_{_k}_CVC"]}
+    print(f"使用卡: CARD_{_k} ****{card['number'][-4:]}", flush=True)
 
     d = None
     random_start = random.randrange(max(1, len(ats)))
@@ -977,6 +979,25 @@ async def main():
             print("最终正文:", (await page.inner_text("body"))[:400].replace("\n", " "), flush=True)
         except Exception:
             pass
+        # —— requires_action 后 3DS 可能自动完成，再等 120 秒看是否落成拒卡 ——
+        if any("requires_action" in (r.get("body") or "") for r in RESP_CAPTURED):
+            print("\n  检测到 requires_action，等待 3DS 自动完成（最多 120s）…", flush=True)
+            _seen = len(RESP_CAPTURED)
+            for _w3 in range(24):
+                await page.wait_for_timeout(5000)
+                if len(RESP_CAPTURED) > _seen:
+                    _seen = len(RESP_CAPTURED)
+                    print(f"  新响应，共 {_seen} 条", flush=True)
+                _all = " ".join((r.get("body") or "") for r in RESP_CAPTURED)
+                if any(k in _all for k in ("decline_code", "card_declined",
+                                           "requires_payment_method", "do_not_honor")):
+                    print("  ★ 3DS 结束，已出现拒卡信号", flush=True)
+                    break
+                try:
+                    await page.screenshot(path="/tmp/after3ds.png")
+                except Exception:
+                    pass
+
         # —— 支付判定 ——
         _verdict, _blame = "UNKNOWN", ""
         for _r in RESP_CAPTURED:
