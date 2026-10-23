@@ -155,14 +155,19 @@ async def solve_hcaptcha(page, tag=""):
             if not pts:
                 # 拖拽题/无法判题的题型 → Skip 换一道
                 skipped = False
-                for lab in ("Skip Challenge", "Skip"):
+                for sel in ('div.button-submit:has-text("Skip")',
+                            'div.button-submit:has-text("Next")',
+                            'text=/Skip Challenge/',
+                            'xpath=//div[contains(@class,"button-submit")]'):
                     try:
-                        bt = fr.locator(f"xpath=//*[starts-with(normalize-space(text()),'{lab}')]")
+                        bt = fr.locator(sel)
                         if await bt.count() > 0:
-                            await bt.first.click(timeout=5000)
-                            skipped = True
-                            print(f"   {tag}已 Skip 换题", flush=True)
-                            break
+                            txt = (await bt.first.inner_text(timeout=2000)) or ""
+                            if "Skip" in txt or "Next" in txt:
+                                await bt.first.click(timeout=5000)
+                                skipped = True
+                                print(f"   {tag}已点 [{txt[:20]}] 换题", flush=True)
+                                break
                     except Exception:
                         pass
                 await page.wait_for_timeout(5000)
@@ -178,12 +183,15 @@ async def solve_hcaptcha(page, tag=""):
                     pass
                 await page.wait_for_timeout(430)
             await page.wait_for_timeout(700)
-            for lab in ("Verify Answers", "Next", "Verify", "Submit"):
+            for sel in ('div.button-submit:has-text("Verify")',
+                        'div.button-submit:has-text("Next")',
+                        'div.button-submit:has-text("Submit")'):
                 try:
-                    bt = fr.locator(f"xpath=//*[normalize-space(text())='{lab}']")
+                    bt = fr.locator(sel)
                     if await bt.count() > 0:
+                        txt2 = (await bt.first.inner_text(timeout=2000)) or ""
                         await bt.first.click(timeout=5000)
-                        print(f"   {tag}提交 {lab}", flush=True)
+                        print(f"   {tag}提交 [{txt2[:24]}]", flush=True)
                         hit = True
                         break
                 except Exception:

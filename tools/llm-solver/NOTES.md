@@ -809,3 +809,19 @@ task = {
 改成 8 步移动 + press 90ms 的真实序列后，挑战稳定出现。
 
 这是整条链路最后一个技术障碍。
+
+## 第 55 轮：Skip 改用 button-submit class，两轮都生效
+
+```
+[0]拖拽题 → 已 Skip 换题 → 点击题 box=1 → 提交 Next → 挑战处理 True
+[1]拖拽题 → 已 Skip 换题
+```
+
+Skip 和 Verify 都改用 class 定位（`div.button-submit:has-text("Skip"/"Next")`），
+比 XPath 文本匹配稳定得多 —— 两轮都成功跳过拖拽题。
+
+### 遗留
+
+第 2 轮 Skip 之后没有继续取新题，运行停在那一行。
+下一轮：Skip 之后要**重新收集 frames**（挑战可能是新 frame），
+再进入下一轮取图。
