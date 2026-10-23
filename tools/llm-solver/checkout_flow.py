@@ -260,7 +260,7 @@ async def solve_hcaptcha(page, tag=""):
                             await page.wait_for_timeout(150)
                             await page.mouse.up()
                             print(f"   {tag}已拖拽 ({round(sx)},{round(sy)}) -> ({round(ex)},{round(ey)})", flush=True)
-                            await page.wait_for_timeout(1200)
+                            await page.wait_for_timeout(3000)
                         pts = [1]
                     except Exception as exc:
                         print(f"   {tag}拖拽求解失败:", str(exc)[:90], flush=True)
@@ -298,6 +298,13 @@ async def solve_hcaptcha(page, tag=""):
                     pass
                 await page.wait_for_timeout(430)
             await page.wait_for_timeout(700)
+            try:
+                allb = await fr.evaluate(
+                    """() => [...document.querySelectorAll('.button-submit')]
+                         .map(e => (e.innerText||'').trim().slice(0,24))""")
+                print(f"   {tag}可用按钮: {allb}", flush=True)
+            except Exception:
+                pass
             for sel in ('div.button-submit:has-text("Verify")',
                         'div.button-submit:has-text("Next")',
                         'div.button-submit:has-text("Submit")'):
