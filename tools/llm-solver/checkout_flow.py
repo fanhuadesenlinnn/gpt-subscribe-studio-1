@@ -44,9 +44,14 @@ def proxy_cfg(url):
 
 async def solve_hcaptcha(page, tag=""):
     """canvas 版：元素截图（不受 CORS 影响）→ 打码服务 → 点击 → Verify。"""
-    for rnd in range(8):
+    for rnd in range(12):
         hit = False
-        for fr in [f for f in page.frames if "hcaptcha" in (f.url or "")]:
+        cands = [f for f in page.frames if "hcaptcha" in (f.url or "")]
+        if not cands:
+            # Skip 后 hCaptcha 会卸载重建 iframe，这个窗口里帧列表为空
+            await page.wait_for_timeout(3000)
+            continue
+        for fr in cands:
             cv = None
             try:
                 # 优先 canvas；没有则退到挑战区里的 <img>
@@ -172,7 +177,9 @@ async def solve_hcaptcha(page, tag=""):
             if not pts:
                 # 拖拽题/无法判题的题型 → Skip 换一道
                 skipped = False
-                for sel in ('div.button-submit:has-text("Skip")',
+                for sel in ('div.refresh.button', 'div.refresh',
+                            '[class*="refresh"]',
+                            'div.button-submit:has-text("Skip")',
                             'div.button-submit:has-text("Next")',
                             'text=/Skip Challenge/',
                             'xpath=//div[contains(@class,"button-submit")]'):

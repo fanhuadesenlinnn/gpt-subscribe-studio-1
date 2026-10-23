@@ -849,3 +849,51 @@ if not cands:
     await page.wait_for_timeout(3000)
     continue          # 直接进下一轮 rnd
 ```
+
+## 第 59 轮：改用 hcaptcha-challenger 的原生求解器（正解）
+
+不再靠 Skip/Refresh 躲题。仓库里已经装着 hcaptcha-challenger，
+它自带**专门的拖拽/点击求解器**，而且用的是「原图 + 网格叠加图」双图输入，
+这才是坐标精度的来源。
+
+### 可用的求解器（已确认存在）
+
+```
+hcaptcha_challenger/tools/spatial/path.py    SpatialPathReasoner   拖拽
+hcaptcha_challenger/tools/spatial/point.py   SpatialPointReasoner  点击
+hcaptcha_challenger/tools/spatial/bbox.py    SpatialBboxReasoner   区域
+hcaptcha_challenger/tools/image_classifier/  Classifier            九宫格
+```
+
+### 拖拽调用方式
+
+```python
+from hcaptcha_challenger.tools.spatial.path import SpatialPathReasoner
+
+r = SpatialPathReasoner(gemini_api_key=KEY)      # provider 已接 Anthropic 中转
+out = await r(
+    challenge_screenshot=Path("canvas.png"),      # 元素截图
+    grid_divisions=Path("grid.png"),              # 网格叠加图
+    auxiliary_information=prompt,                 # 题面
+)
+# out: ImageDragDropChallenge
+#   .challenge_prompt: str
+#   .paths: List[SpatialPath]   ← 每条含起点/终点
+```
+
+### 点击题
+
+`ImageBboxChallenge` → `.bounding_boxes: SpatialBbox`
+
+### 关键点：必须提供网格叠加图
+
+模型看「原图 + 带标注的网格图」两张，才能给出准确坐标。
+第 28 轮我手工做过类似的（列 A-J / 行 1-7），但没用在 LLM 上。
+这里要按 challenger 的 `path.md` / `point.md` 提示词要求生成对应的网格图。
+
+### 下一步
+
+1. 用 PIL 生成网格叠加图（列标 + 行标，红线）
+2. 拖拽题 → SpatialPathReasoner → `paths` → `mouse.move(start) → down → 分步 move → up`
+3. 点击题 → SpatialPointReasoner → bounding_boxes → 点击
+4. 不再 Skip，一次答对
