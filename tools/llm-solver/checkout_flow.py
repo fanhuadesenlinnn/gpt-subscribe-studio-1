@@ -918,6 +918,25 @@ async def main():
             except Exception:
                 body = ""
             RESP_CAPTURED.append({"url": u[:110], "status": resp.status, "body": body})
+
+            # 第一阶段落盘：拿到含 payment_intent 的响应就写 stage1.json，
+            # 之后的 3DS 等待交给 poll_pi.py（不受浏览器超时限制）
+            if "payment_pages/" in u and "payment_intent" in body:
+                try:
+                    _j = json.loads(body)
+                    _pi = _j.get("payment_intent") or {}
+                    if _pi.get("id"):
+                        Path("/tmp/stage1.json").write_text(json.dumps({
+                            "pi": {"id": _pi.get("id"),
+                                   "client_secret": _pi.get("client_secret"),
+                                   "status": _pi.get("status"),
+                                   "next_action": _pi.get("next_action")},
+                            "cs": _j.get("id"),
+                        }, ensure_ascii=False))
+                        print(f"   ★ stage1 落盘: {_pi.get('id')} "
+                              f"status={_pi.get('status')}", flush=True)
+                except Exception:
+                    pass
             print(f"   << RESP {resp.status} {u[-50:]} :: {body[:260]}", flush=True)
             try:
                 Path("/tmp/confirm_resp.json").write_text(body)
