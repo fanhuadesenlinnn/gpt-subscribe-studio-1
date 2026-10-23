@@ -842,6 +842,13 @@ async def main():
 
         async def _on_resp(resp):
             u = resp.url or ""
+            if "hcaptcha.com" in u and ("checkcaptcha" in u or "getcaptcha" in u):
+                try:
+                    _tb = await resp.text()
+                except Exception:
+                    _tb = ""
+                print(f"   >> HCAPTCHA {resp.status} {u.split('hcaptcha.com')[-1][:40]} :: {_tb[:200]}", flush=True)
+                return
             if "api.stripe.com/v1/" not in u:
                 return
             if not any(k in u for k in ("payment_pages/", "payment_intents/")):
