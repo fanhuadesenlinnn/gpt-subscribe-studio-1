@@ -825,3 +825,27 @@ Skip 和 Verify 都改用 class 定位（`div.button-submit:has-text("Skip"/"Nex
 第 2 轮 Skip 之后没有继续取新题，运行停在那一行。
 下一轮：Skip 之后要**重新收集 frames**（挑战可能是新 frame），
 再进入下一轮取图。
+
+## 第 57 轮：Skip 之后 hcaptcha frame 消失
+
+加了轮询等 canvas 仍无效，说明问题不在「等多久」，而在**帧本身没了**：
+
+```
+[1]已 Skip 换题
+（之后 6 轮毫无输出 —— 连 "canvas" 都没打印）
+```
+
+Skip 后 hCaptcha 会短暂卸载挑战 iframe 再重建，
+这个窗口里 `[f for f in page.frames if "hcaptcha" in f.url]` **是空的**，
+所以 `for fr in ...` 一次都不执行，什么都没打印。
+
+### 修法（下一轮，很小）
+
+帧列表为空时也要等待重试：
+
+```python
+cands = [f for f in page.frames if "hcaptcha" in (f.url or "")]
+if not cands:
+    await page.wait_for_timeout(3000)
+    continue          # 直接进下一轮 rnd
+```

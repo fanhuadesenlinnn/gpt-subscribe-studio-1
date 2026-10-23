@@ -74,9 +74,26 @@ async def solve_hcaptcha(page, tag=""):
                 cv = None
 
             if cv is None and rnd > 0:
-                # 后续轮次：只等待题目图渲染，不重复点方框
-                await page.wait_for_timeout(4000)
-                continue
+                # 后续轮次：轮询等新题目图渲染（Skip 后挑战要重新布局）
+                for _w in range(10):
+                    try:
+                        el2 = await fr.query_selector("canvas")
+                        if el2 is not None:
+                            bb2 = await el2.bounding_box()
+                            if bb2 and bb2["width"] > 120 and bb2["height"] > 120:
+                                fp2 = Path("/tmp/co_cv.png")
+                                await el2.screenshot(path=str(fp2))
+                                cv = {"W": max(1, round(bb2["width"])),
+                                      "H": max(1, round(bb2["height"])),
+                                      "rect": {"x": bb2["x"], "y": bb2["y"],
+                                               "w": bb2["width"], "h": bb2["height"]},
+                                      "path": str(fp2)}
+                                break
+                    except Exception:
+                        pass
+                    await page.wait_for_timeout(2000)
+                if cv is None:
+                    continue
             if cv is None:
                 clicked = False
                 for sel in ('#checkbox', '[role="checkbox"]', 'div.checkbox'):
