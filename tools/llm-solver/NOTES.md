@@ -786,3 +786,26 @@ task = {
 
 建议先做 B：Skip 按钮已经在 DOM 里（`DIV|Skip Challenge, page 1 of 2`），
 换到点击题后现有 box 逻辑立刻可用。
+
+## 第 53 轮：★★ 真实指针序列解决了「canvas 不出现」★★
+
+改成 `mouse.move` 分步 + `mouse.down` + `mouse.up`（而不是一次 `mouse.click`）后：
+
+```
+[0]canvas 500x470 已截图
+[0]题面=Drag the correct icon to complete the ci   box点数=0  → Skip
+[0]canvas 500x470 已截图
+[0]题面=Pick the object that moves in the same p   box点数=1  → 判题成功
+[0]提交 Next                                                    → 已提交
+[0] 挑战处理: True
+```
+
+**完整闭环第一次跑通**：取图 → 判题（服务商返回 1 个点）→ 点击 → 提交 Next。
+
+### 根因
+
+`page.mouse.click()` 是瞬时合成事件，hCaptcha 检测到缺少指针移动轨迹，
+判定为自动化，**不渲染图像题**（所以前几轮一直 `canvas` 取不到）。
+改成 8 步移动 + press 90ms 的真实序列后，挑战稳定出现。
+
+这是整条链路最后一个技术障碍。

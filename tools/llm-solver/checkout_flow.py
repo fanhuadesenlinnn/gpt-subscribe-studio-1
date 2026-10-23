@@ -89,13 +89,24 @@ async def solve_hcaptcha(page, tag=""):
                     except Exception:
                         pass
                 if not clicked:
+                    # 真实指针序列：逐步移动 + 按下/抬起（合成 click 容易被判可疑）
                     try:
-                        await page.mouse.click(513, 437)
+                        tx, ty = 513, 437
+                        await page.mouse.move(400, 300)
+                        await page.wait_for_timeout(120)
+                        for k in range(1, 9):
+                            await page.mouse.move(400 + (tx - 400) * k / 8,
+                                                  300 + (ty - 300) * k / 8)
+                            await page.wait_for_timeout(35)
+                        await page.wait_for_timeout(150)
+                        await page.mouse.down()
+                        await page.wait_for_timeout(90)
+                        await page.mouse.up()
                         clicked = True
                     except Exception:
                         pass
                 print(f"   {tag}点 I am human -> {clicked}", flush=True)
-                await page.wait_for_timeout(8000)
+                await page.wait_for_timeout(9000)
                 continue
 
             print(f"   {tag}canvas {cv['W']}x{cv['H']} 已截图", flush=True)
