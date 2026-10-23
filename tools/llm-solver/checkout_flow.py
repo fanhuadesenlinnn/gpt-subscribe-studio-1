@@ -3,6 +3,7 @@ import asyncio
 import base64
 import json
 import os
+import random
 import re
 import secrets
 import sys
@@ -494,7 +495,8 @@ async def main():
             "exp_year": env["CARD_A_EXP_YEAR"], "cvc": env["CARD_A_CVC"]}
 
     d = None
-    for i in range(4):
+    random_start = random.randrange(max(1, len(ats)))
+    for i in range(random_start, min(random_start + 6, len(ats))):
         at = ats[i] if isinstance(ats[i], str) else ats[i].get("access_token", "")
         with httpx.Client(base_url=API, timeout=300, follow_redirects=False) as c:
             r = c.post("/login", data={"password": auth["password"]}, headers={"Origin": ORIGIN})
