@@ -16,6 +16,8 @@ sys.path.insert(0, "/opt/gss/app/packages/core/src")
 from gss_core.proxies import align_proxy_region, configured_proxy
 
 API = "http://127.0.0.1:18120"
+CAPTURED = []      # 抓到的 hCaptcha token / verify_challenge 请求体
+API_REQS = []      # 所有 api.stripe.com POST 路径
 ORIGIN = os.environ.get("GSS_PUBLIC_ORIGIN", "https://<PAY_HOST>")
 CHROME = "/usr/bin/google-chrome"
 CAPTCHA_KEY = os.environ.get("GSS_CAPTCHA_API_KEY", "")
@@ -68,6 +70,30 @@ async def reason_drag(canvas_png: str, grid_png: str, prompt: str):
 
 
 
+
+async def challenge_open(page):
+    """挑战是否还开着。注意：弹窗和题目都在 iframe 里，必须遍历 frame。"""
+    keys = ("one more step", "select the checkbox", "i am human",
+            "verify you are human")
+    for fr in page.frames:
+        try:
+            t = (await fr.evaluate(
+                "() => document.body ? document.body.innerText : ''") or "").lower()
+        except Exception:
+            continue
+        if any(k in t for k in keys):
+            return True
+        # 有九宫格或 canvas 也算挑战开着
+        try:
+            if await fr.locator('div[role="button"]').count() >= 9:
+                return True
+            if await fr.locator("canvas").count() > 0:
+                return True
+        except Exception:
+            pass
+    return False
+
+
 async def page_state(page):
     """返回页面推进状态：processing / done / error / none。"""
     try:
@@ -106,6 +132,82 @@ async def solve_hcaptcha(page, tag=""):
             await page.wait_for_timeout(3000)
             continue
         for fr in cands:
+            # ── DOM 九宫格题（无 canvas，9 个 role=button 图块）──
+            try:
+                tiles_loc = fr.locator('div[role="button"]')
+                n_tiles = await tiles_loc.count()
+            except Exception:
+                n_tiles = 0
+            if n_tiles >= 9:
+                print(f"   {tag}检测到 DOM 九宫格（{n_tiles} 块）", flush=True)
+                prompt = ""
+                try:
+                    prompt = await fr.evaluate(
+                        """() => { const e = document.querySelector('.prompt-text')
+                             || document.querySelector('div[class*=prompt]');
+                             return e ? e.innerText : ''; }""")
+                except Exception:
+                    pass
+                prompt = " ".join(str(prompt).split())[:150]
+                tiles = []
+                for _i in range(9):
+                    _fp = Path(f"/tmp/grid_{_i}.png")
+                    try:
+                        await tiles_loc.nth(_i).screenshot(path=str(_fp), timeout=6000)
+                        tiles.append(_fp)
+                    except Exception:
+                        tiles.append(None)
+                if any(tiles):
+                    task = {"type": "HCaptchaClassification",
+                            "queries": [base64.b64encode(Path(t).read_bytes()).decode()
+                                        for t in tiles if t]}
+                    if prompt:
+                        task["question"] = prompt
+                    try:
+                        async with httpx.AsyncClient(timeout=90) as _c:
+                            _r = await _c.post("https://api.yescaptcha.com/createTask",
+                                               json={"clientKey": CAPTCHA_KEY, "task": task})
+                            _j = _r.json() or {}
+                    except Exception as _e:
+                        _j = {}
+                        print(f"   {tag}九宫格判题异常:", str(_e)[:60], flush=True)
+                    _sol = _j.get("solution") or {}
+                    idxs = [i for i, v in enumerate(_sol.get("objects") or []) if v]
+                    print(f"   {tag}九宫格题面={prompt[:45]} 选={idxs}", flush=True)
+                    boxes = await fr.evaluate(
+                        """() => [...document.querySelectorAll('div[role="button"]')]
+                             .map(d => { const r = d.getBoundingClientRect();
+                               return {x: r.x + r.width/2, y: r.y + r.height/2}; })""")
+                    boxes = sorted(boxes, key=lambda b: (round(b["y"] / 20), b["x"]))[:9]
+                    # getBoundingClientRect 是 iframe 内坐标，点击要用页面坐标 → 加 iframe 偏移
+                    _ox = _oy = 0
+                    try:
+                        _fe = await fr.frame_element()
+                        _fbb = await _fe.bounding_box()
+                        if _fbb:
+                            _ox, _oy = _fbb["x"], _fbb["y"]
+                    except Exception:
+                        pass
+                    print(f"   {tag}iframe 偏移 ({round(_ox)},{round(_oy)})", flush=True)
+                    for _ix in idxs:
+                        if 0 <= _ix < len(boxes):
+                            await page.mouse.click(_ox + boxes[_ix]["x"], _oy + boxes[_ix]["y"])
+                            await page.wait_for_timeout(420)
+                    await page.wait_for_timeout(800)
+                    for _lab in ("Verify", "Next", "Submit"):
+                        try:
+                            _bt = fr.locator(f"div.button-submit:has-text('{_lab}')")
+                            if await _bt.count() > 0:
+                                await _bt.first.click(timeout=6000)
+                                print(f"   {tag}九宫格提交 {_lab}", flush=True)
+                                break
+                        except Exception:
+                            pass
+                    await page.wait_for_timeout(4000)
+                    hit = True
+                    submitted_any = True
+                    break
+
             cv = None
             try:
                 # 优先 canvas；没有则退到挑战区里的 <img>
@@ -160,15 +262,12 @@ async def solve_hcaptcha(page, tag=""):
                 # 轮询失败不再 continue —— 落到下面的点击分支，允许重置后再点方框
             if cv is None:
                 if clicked_once or submitted_any:
-                    # 等太久还没有题目图 → hCaptcha 可能已重置回方框状态，允许再点一次
-                    if rnd >= 2:
-                        print(f"   {tag}长时间无题，重新点一次方框", flush=True)
-                        clicked_once = False
-                        submitted_any = False
-                        await page.wait_for_timeout(1000)
-                    else:
-                        await page.wait_for_timeout(3000)
-                        continue
+                    # 弹窗还在就继续等；弹窗消失即视为已通过
+                    if not await challenge_open(page):
+                        print(f"   {tag}★ 弹窗已消失 → 视为通过", flush=True)
+                        return True
+                    await page.wait_for_timeout(3000)
+                    continue
                 clicked_once = True
                 clicked = False
                 for sel in ('#checkbox', '[role="checkbox"]', 'div.checkbox'):
@@ -228,6 +327,45 @@ async def solve_hcaptcha(page, tag=""):
                     except Exception:
                         pass
                 print(f"   {tag}点 I am human -> {clicked}，等待 60 秒", flush=True)
+
+                # 静默通过检测：点完没出题、弹窗也消失 → 已经过了，不需要重试
+                for _q in range(6):
+                    await page.wait_for_timeout(2000)
+                    if not await challenge_open(page):
+                        st_q = await page_state(page)
+                        print(f"   {tag}★★★ 无题 = 已通过（弹窗已消失）state={st_q}", flush=True)
+                        # 等 confirm 发出；若只创建了 pm 没有 confirm，再点一次提交
+                        for _tk in range(8):
+                            await page.wait_for_timeout(2000)
+                            if any("confirm" in r for r in API_REQS):
+                                print(f"   {tag}★ confirm 已发出", flush=True)
+                                break
+                        if not any("confirm" in r for r in API_REQS):
+                            print(f"   {tag}无 confirm，再点一次提交", flush=True)
+                            for _sel in ("button[type=submit]",
+                                         "button:has-text('Subscribe')",
+                                         "button:has-text('Pay')"):
+                                try:
+                                    _b = page.locator(_sel)
+                                    if await _b.count() > 0:
+                                        await _b.first.click(timeout=8000)
+                                        print(f"   {tag}已再次点击 {_sel}", flush=True)
+                                        break
+                                except Exception:
+                                    pass
+                            for _tk2 in range(12):
+                                await page.wait_for_timeout(2500)
+                                if any("confirm" in r for r in API_REQS):
+                                    print(f"   {tag}★ confirm 已发出（二次点击后）", flush=True)
+                                    break
+                                if CAPTURED:
+                                    break
+                        try:
+                            await page.screenshot(path=f"/tmp/passed_{rnd}.png")
+                            print(f"   {tag}已存截图 /tmp/passed_{rnd}.png", flush=True)
+                        except Exception:
+                            pass
+                        return True
                 # hCaptcha 出题/静默通过都需要较长时间，分 12 段轮询
                 for _w in range(12):
                     await page.wait_for_timeout(5000)
@@ -344,6 +482,22 @@ async def solve_hcaptcha(page, tag=""):
                 if skipped:
                     continue
 
+            # 调试：把服务商给的点画到 canvas 上，便于人工核对
+            try:
+                from PIL import Image as _I, ImageDraw as _D
+                _im = _I.open(cv["path"]).convert("RGB")
+                _d = _D.Draw(_im)
+                for _bx, _by in pts[:6]:
+                    _x = float(_bx) / cv["W"] * _im.width
+                    _y = float(_by) / cv["H"] * _im.height
+                    _d.ellipse([_x-12, _y-12, _x+12, _y+12], outline=(255,0,0), width=3)
+                    _d.line([_x-16,_y,_x+16,_y], fill=(255,0,0), width=2)
+                    _d.line([_x,_y-16,_x,_y+16], fill=(255,0,0), width=2)
+                _im.save(f"/tmp/verify_pts_{rnd}.jpg", quality=92)
+                print(f"   {tag}已存核对图 /tmp/verify_pts_{rnd}.jpg", flush=True)
+            except Exception as _e:
+                print(f"   {tag}核对图失败:", str(_e)[:50], flush=True)
+
             for bx, by in pts[:6]:
                 px = rect["x"] + (bx / cv["W"]) * rect["w"]
                 py = rect["y"] + (by / cv["H"]) * rect["h"]
@@ -443,7 +597,10 @@ async def fill_stripe_fields(page, card, email="buyer@example.com"):
                 try:
                     loc = fr.locator(sel)
                     if await loc.count() > 0:
-                        await loc.first.fill(val, timeout=4000)
+                        el0 = loc.first
+                        # 不先 click（会触发 Google 地址联想下拉，遮挡后续字段）
+                        await page.wait_for_timeout(random.randint(60, 200))
+                        await el0.fill(str(val), timeout=6000)
                         filled.append(label)
                         return True
                 except Exception:
@@ -556,6 +713,23 @@ async def fill_stripe_fields(page, card, email="buyer@example.com"):
                 break
             frames = await all_frames(page)
             ok = await try_fill(sels, val, lab)
+    # ── 兜底：重新收集帧，再补一次 city / postal ──
+    try:
+        frames = await all_frames(page)
+        for _lab, _sels, _val in (
+            ("city", ['input[placeholder="City"]', 'input[name="city"]',
+                      'input[autocomplete="address-level2"]'], "Portland"),
+            ("postal", ['input[placeholder="ZIP"]', 'input[name="postal"]',
+                        'input[autocomplete="postal-code"]'], "97211"),
+        ):
+            if _lab in filled:
+                continue
+            _ok = await try_fill(_sels, _val, _lab)
+            print(f"   兜底填 {_lab}: {_ok}", flush=True)
+    except Exception as _e:
+        print("   兜底填写异常:", str(_e)[:60], flush=True)
+
+
     return filled
 
 
@@ -592,13 +766,60 @@ async def main():
     proxy = align_proxy_region(configured_proxy("checkout"), "US")
     proxy = re.sub(r"sid-[A-Za-z0-9]+", "sid-" + secrets.token_hex(4), proxy or "") or None
 
-    from playwright.async_api import async_playwright
+    from patchright.async_api import async_playwright
     async with async_playwright() as p:
-        b = await p.chromium.launch(executable_path=CHROME, headless=False,
-                                    args=["--no-sandbox", "--disable-dev-shm-usage",
-                                          "--window-size=1280,980"])
-        ctx = await b.new_context(proxy=proxy_cfg(proxy), viewport={"width": 1280, "height": 980})
-        page = await ctx.new_page()
+        # 持久化 profile：累积 cookie / localStorage / 历史，降低 hCaptcha 风险分
+        PROFILE = os.environ.get("GSS_BROWSER_PROFILE", "/opt/gss/browser-profile")
+        os.makedirs(PROFILE, exist_ok=True)
+        ctx = await p.chromium.launch_persistent_context(
+            user_data_dir=PROFILE,
+            executable_path=CHROME, headless=False,
+            proxy=proxy_cfg(proxy),
+            viewport={"width": 1280, "height": 980},
+            locale="en-US", timezone_id="America/New_York",
+            args=["--no-sandbox", "--disable-dev-shm-usage",
+                  "--window-size=1280,980",
+                  "--disable-blink-features=AutomationControlled"],
+        )
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+
+        # 抓 token：hCaptcha 企业版 token 以 P1_ 开头，Stripe 提交 verify_challenge 时在请求体里
+        def _on_req(req):
+            try:
+                pd = req.post_data
+            except Exception:
+                pd = None
+            u = req.url or ""
+            if pd and ("challenge_response_token" in pd or "P1_" in pd):
+                CAPTURED.append({"url": u[:120], "body": pd})
+                tok = ""
+                for part in pd.replace("&", "\n").split("\n"):
+                    if part.startswith("challenge_response_token="):
+                        tok = part.split("=", 1)[1]
+                if tok:
+                    try:
+                        Path("/tmp/token_captured.txt").write_text(tok)
+                    except Exception:
+                        pass
+                    print(f"   ★★★ 抓到 hCaptcha token！长度 {len(tok)}", flush=True)
+                else:
+                    print(f"   ★ 抓到含 token 的请求: {u[:80]}", flush=True)
+            elif "api.stripe.com/v1/" in u and req.method == "POST":
+                key = u.split("api.stripe.com")[-1][:70]
+                API_REQS.append(key)
+                if pd:
+                    hit = ""
+                    for pat in ("challenge_response_token=", "payment_method=",
+                                "confirmation_token="):
+                        if pat in pd:
+                            hit = pat
+                            break
+                    print(f"   → POST {key} [{hit or '-'}] len={len(pd)}", flush=True)
+            elif "verify_challenge" in u:
+                CAPTURED.append({"url": u[:120], "body": pd or ""})
+                print(f"   ★ verify_challenge 请求已发出", flush=True)
+
+        page.on("request", _on_req)
         ok = False
         for att in range(4):
             try:
@@ -638,8 +859,20 @@ async def main():
             await page.wait_for_timeout(6000)
             did = await solve_hcaptcha(page, tag=f"[{rnd}]")
             print(f"[{rnd}] 挑战处理: {did}", flush=True)
-            if not did:
+            if did:
+                print(f"[{rnd}] 挑战已通过，等待支付结果…", flush=True)
+                for _r in range(10):
+                    await page.wait_for_timeout(3000)
+                    st_r = await page_state(page)
+                    if st_r in ("done", "declined", "error"):
+                        print(f"[{rnd}] ★ 最终状态: {st_r}", flush=True)
+                        break
+                try:
+                    await page.screenshot(path="/tmp/final_result.png")
+                except Exception:
+                    pass
                 break
+            break
 
         await page.screenshot(path="/tmp/co_after_submit.png")
         await page.wait_for_timeout(9000)
@@ -647,8 +880,19 @@ async def main():
             print("最终正文:", (await page.inner_text("body"))[:400].replace("\n", " "), flush=True)
         except Exception:
             pass
-        await page.screenshot(path="/tmp/co_final.png")
-        await b.close()
+        # —— token 汇总 ——
+        if CAPTURED:
+            print("\n=== ★ 捕获到 token / verify_challenge ===", flush=True)
+            for c in CAPTURED[:3]:
+                print(f"   {c['url'][:90]}", flush=True)
+                print(f"   body: {c['body'][:200]}", flush=True)
+        else:
+            print("\n=== 未捕获到 token ===", flush=True)
+        try:
+            await page.screenshot(path="/tmp/co_final.png")
+        except Exception:
+            pass
+        await ctx.close()
 
 
 if __name__ == "__main__":
