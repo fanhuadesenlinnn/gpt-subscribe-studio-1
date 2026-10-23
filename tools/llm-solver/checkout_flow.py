@@ -203,7 +203,19 @@ async def solve_hcaptcha(page, tag=""):
                                 break
                         except Exception:
                             pass
-                    await page.wait_for_timeout(4000)
+                    # 提交后立刻记录状态：看是出了第二页、提示答错、还是已在加载
+                    for _w2 in range(10):
+                        await page.wait_for_timeout(3000)
+                        if any("confirm" in r for r in API_REQS) or CAPTURED:
+                            print(f"   {tag}★ 提交后已触发 confirm/token", flush=True)
+                            break
+                    try:
+                        await page.screenshot(path=f"/tmp/grid_after_{rnd}.png")
+                        _bt2 = [f.url[:45] for f in page.frames if "hcaptcha" in (f.url or "")]
+                        print(f"   {tag}提交后 hcaptcha 帧={len(_bt2)} "
+                              f"截图 /tmp/grid_after_{rnd}.png", flush=True)
+                    except Exception:
+                        pass
                     hit = True
                     submitted_any = True
                     break
@@ -804,6 +816,12 @@ async def main():
                     print(f"   ★★★ 抓到 hCaptcha token！长度 {len(tok)}", flush=True)
                 else:
                     print(f"   ★ 抓到含 token 的请求: {u[:80]}", flush=True)
+                    # 直接打印原文，不猜字段名
+                    print(f"   BODY: {pd[:700]}", flush=True)
+                    try:
+                        Path("/tmp/token_body.txt").write_text(pd)
+                    except Exception:
+                        pass
             elif "api.stripe.com/v1/" in u and req.method == "POST":
                 key = u.split("api.stripe.com")[-1][:70]
                 API_REQS.append(key)
