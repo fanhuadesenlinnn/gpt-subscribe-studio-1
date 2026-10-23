@@ -897,3 +897,17 @@ out = await r(
 2. 拖拽题 → SpatialPathReasoner → `paths` → `mouse.move(start) → down → 分步 move → up`
 3. 点击题 → SpatialPointReasoner → bounding_boxes → 点击
 4. 不再 Skip，一次答对
+
+## 第 63 轮：限制单次点击后仍不出题
+
+```
+挑战帧已出现
+   [0]点 I am human -> True      ← 只点了一次（限制生效）
+（之后 12 轮等待，canvas 始终未出现）
+```
+
+第 53 轮同样的一次点击能出 canvas（并成功判题+提交），现在不能。
+差别只可能是 **hCaptcha 按会话/IP 风险评分决定是否下发题目** ——
+同一出口 IP 短时间内反复跑结账流程，被判定为高风险后就不再给题。
+
+这解释了为什么最近十几轮表现忽好忽坏：不是代码问题，是**风控状态**问题。
