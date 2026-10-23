@@ -143,7 +143,17 @@ async def solve_hcaptcha(page, tag=""):
                 if not clicked:
                     # 真实指针序列：逐步移动 + 按下/抬起（合成 click 容易被判可疑）
                     try:
+                        # 从 checkbox iframe 的真实位置算中心点（硬编码坐标会因页面滚动而落空）
                         tx, ty = 513, 437
+                        for el2 in await page.query_selector_all("iframe"):
+                            src2 = (await el2.get_attribute("src")) or ""
+                            if "frame=checkbox" in src2:
+                                bb2 = await el2.bounding_box()
+                                if bb2:
+                                    tx = bb2["x"] + bb2["width"] / 2
+                                    ty = bb2["y"] + bb2["height"] / 2
+                                    print(f"   {tag}checkbox 位置 ({round(tx)},{round(ty)})", flush=True)
+                                break
                         await page.mouse.move(400, 300)
                         await page.wait_for_timeout(120)
                         for k in range(1, 9):
