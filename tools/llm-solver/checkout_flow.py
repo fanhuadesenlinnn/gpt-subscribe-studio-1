@@ -67,6 +67,33 @@ async def reason_drag(canvas_png: str, grid_png: str, prompt: str):
     return out
 
 
+
+async def page_state(page):
+    """返回页面推进状态：processing / done / error / none。"""
+    try:
+        body = await page.inner_text("body")
+    except Exception:
+        return "none"
+    b = (body or "").lower()
+    # 挑战窗还开着 → 一定还没通过（"Processing" 只是按钮文案，不能当成功信号）
+    if "one more step" in b or "select the checkbox" in b or "i am human" in b:
+        return "none"
+    for k in ("thank you", "success", "you're all set", "subscription confirmed"):
+        if k in b:
+            return "done"
+    for k in ("declined", "your card was declined", "card was declined",
+              "could not be charged", "payment failed"):
+        if k in b:
+            return "declined"
+    for k in ("verifying payment", "authenticating"):
+        if k in b:
+            return "processing"
+    for k in ("something went wrong", "try again"):
+        if k in b:
+            return "error"
+    return "none"
+
+
 async def solve_hcaptcha(page, tag=""):
     """canvas 版：元素截图（不受 CORS 影响）→ 打码服务 → 点击 → Verify。"""
     clicked_once = False
@@ -105,6 +132,10 @@ async def solve_hcaptcha(page, tag=""):
                 cv = None
 
             if cv is None and rnd > 0:
+                st2 = await page_state(page)
+                if st2 != "none":
+                    print(f"   {tag}★ 页面已推进: {st2}", flush=True)
+                    return True
                 # 后续轮次：轮询等新题目图渲染（Skip 后挑战要重新布局）
                 for _w in range(10):
                     try:
@@ -188,8 +219,23 @@ async def solve_hcaptcha(page, tag=""):
                         clicked = True
                     except Exception:
                         pass
-                print(f"   {tag}点 I am human -> {clicked}", flush=True)
-                await page.wait_for_timeout(9000)
+                print(f"   {tag}点 I am human -> {clicked}，等待 60 秒", flush=True)
+                # hCaptcha 出题/静默通过都需要较长时间，分 12 段轮询
+                for _w in range(12):
+                    await page.wait_for_timeout(5000)
+                    st = await page_state(page)
+                    if st != "none":
+                        print(f"   {tag}★ 页面已推进: {st}", flush=True)
+                        return True
+                    try:
+                        elw = await fr.query_selector("canvas")
+                        if elw is not None:
+                            bbw = await elw.bounding_box()
+                            if bbw and bbw["width"] > 120:
+                                print(f"   {tag}canvas 已出现（等待 {(_w+1)*5}s）", flush=True)
+                                break
+                    except Exception:
+                        pass
                 continue
 
             print(f"   {tag}canvas {cv['W']}x{cv['H']} 已截图", flush=True)
