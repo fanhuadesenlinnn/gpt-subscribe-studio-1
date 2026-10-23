@@ -84,12 +84,23 @@ async def challenge_open(page):
             continue
         if any(k in t for k in keys):
             return True
-        # 有九宫格或 canvas 也算挑战开着
+        # 只认「可见」的九宫格 / canvas（隐藏的旧元素会让循环永远等下去）
         try:
-            if await fr.locator('div[role="button"]').count() >= 9:
-                return True
-            if await fr.locator("canvas").count() > 0:
-                return True
+            _tiles = fr.locator('div[role="button"]')
+            _n = await _tiles.count()
+            for _i in range(min(_n, 12)):
+                try:
+                    if await _tiles.nth(_i).is_visible():
+                        _bb = await _tiles.nth(_i).bounding_box()
+                        if _bb and _bb["width"] > 40 and _bb["height"] > 40:
+                            return True
+                except Exception:
+                    pass
+            _cv = await fr.query_selector("canvas")
+            if _cv is not None:
+                _cb = await _cv.bounding_box()
+                if _cb and _cb["width"] > 120 and _cb["height"] > 120:
+                    return True
         except Exception:
             pass
     return False
@@ -158,6 +169,17 @@ async def solve_hcaptcha(page, tag=""):
                         tiles.append(_fp)
                     except Exception:
                         tiles.append(None)
+
+                # 整张九宫格一张图（给 LLM Classifier 用）
+                _grid_png = ""
+                try:
+                    _fe2 = await fr.frame_element()
+                    _bb2 = await _fe2.bounding_box()
+                    if _bb2:
+                        _grid_png = "/tmp/grid_full.png"
+                        await page.screenshot(path=_grid_png, clip=_bb2)
+                except Exception as _e:
+                    print(f"   {tag}整图截图失败:", str(_e)[:50], flush=True)
                 if any(tiles):
                     task = {"type": "HCaptchaClassification",
                             "queries": [base64.b64encode(Path(t).read_bytes()).decode()
@@ -174,6 +196,36 @@ async def solve_hcaptcha(page, tag=""):
                         print(f"   {tag}九宫格判题异常:", str(_e)[:60], flush=True)
                     _sol = _j.get("solution") or {}
                     idxs = [i for i, v in enumerate(_sol.get("objects") or []) if v]
+
+                    # 优先用 LLM Classifier（服务商判错时靠它兜底）
+                    if _grid_png:
+                        try:
+                            from hcaptcha_challenger.tools.image_classifier import (
+                                Classifier as _Clf)
+                            _clf = _Clf(gemini_api_key="x")
+                            _ans = await _clf(challenge_screenshot=Path(_grid_png))
+                            _d2 = _ans.model_dump()
+                            print(f"   {tag}LLM 原始返回: {json.dumps(_d2, ensure_ascii=False)[:200]}",
+                                  flush=True)
+                            _coords = (_d2.get("coordinates")
+                                       or _d2.get("selected_coordinates")
+                                       or _d2.get("cells") or [])
+                            _li = []
+                            for _c in _coords:
+                                try:
+                                    if isinstance(_c, (list, tuple)) and len(_c) >= 2:
+                                        _li.append(int(_c[0]) * 3 + int(_c[1]))
+                                    elif isinstance(_c, dict):
+                                        _li.append(int(_c.get("row", 0)) * 3
+                                                   + int(_c.get("col", 0)))
+                                except Exception:
+                                    pass
+                            if _li:
+                                print(f"   {tag}改用 LLM 结果 {_li}（服务商给的是 {idxs}）",
+                                      flush=True)
+                                idxs = _li
+                        except Exception as _e3:
+                            print(f"   {tag}LLM 判题失败:", str(_e3)[:70], flush=True)
                     print(f"   {tag}九宫格题面={prompt[:45]} 选={idxs}", flush=True)
                     boxes = await fr.evaluate(
                         """() => [...document.querySelectorAll('div[role="button"]')]
