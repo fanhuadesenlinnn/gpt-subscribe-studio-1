@@ -18,6 +18,7 @@ from gss_core.proxies import align_proxy_region, configured_proxy
 API = "http://127.0.0.1:18120"
 CAPTURED = []      # 抓到的 hCaptcha token / verify_challenge 请求体
 API_REQS = []      # 所有 api.stripe.com POST 路径
+RESP_CAPTURED = [] # 支付相关响应
 ORIGIN = os.environ.get("GSS_PUBLIC_ORIGIN", "https://<PAY_HOST>")
 CHROME = "/usr/bin/google-chrome"
 CAPTCHA_KEY = os.environ.get("GSS_CAPTCHA_API_KEY", "")
@@ -838,6 +839,25 @@ async def main():
                 print(f"   ★ verify_challenge 请求已发出", flush=True)
 
         page.on("request", _on_req)
+
+        async def _on_resp(resp):
+            u = resp.url or ""
+            if "api.stripe.com/v1/" not in u:
+                return
+            if not any(k in u for k in ("payment_pages/", "payment_intents/")):
+                return
+            try:
+                body = await resp.text()
+            except Exception:
+                body = ""
+            RESP_CAPTURED.append({"url": u[:110], "status": resp.status, "body": body})
+            print(f"   << RESP {resp.status} {u[-50:]} :: {body[:260]}", flush=True)
+            try:
+                Path("/tmp/confirm_resp.json").write_text(body)
+            except Exception:
+                pass
+
+        page.on("response", lambda r: asyncio.create_task(_on_resp(r)))
         ok = False
         for att in range(4):
             try:
@@ -898,6 +918,23 @@ async def main():
             print("最终正文:", (await page.inner_text("body"))[:400].replace("\n", " "), flush=True)
         except Exception:
             pass
+        # —— 支付判定 ——
+        _verdict, _blame = "UNKNOWN", ""
+        for _r in RESP_CAPTURED:
+            _b = (_r.get("body") or "")
+            for _k in ("card_declined", "do_not_honor", "generic_decline",
+                       "insufficient_funds", "incorrect_number", "declined"):
+                if _k in _b:
+                    _verdict, _blame = "DECLINED", _k
+                    break
+            if _verdict == "DECLINED":
+                break
+            if "requires_action" in _b:
+                _verdict = "REQUIRES_ACTION"
+        print(f"\n=== 支付判定: {_verdict} {_blame} ===", flush=True)
+        for _r in RESP_CAPTURED[-4:]:
+            print(f"   [{_r['status']}] {_r['url'][-60:]}", flush=True)
+
         # —— token 汇总 ——
         if CAPTURED:
             print("\n=== ★ 捕获到 token / verify_challenge ===", flush=True)
