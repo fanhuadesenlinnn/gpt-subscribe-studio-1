@@ -607,15 +607,18 @@ class PlusProtocol:
             # Stripe 侧要求 ctoken 带 setup_future_usage（订阅要保存卡片），
             # 而 ChatGPT 侧的 confirm 用的是另一个 token，两者可以不同。
             intent_ctoken = ctoken
-            try:
-                intent_ctoken = self.client.create_confirmation_token(
-                    publishable_key=self.publishable_key,
-                    payment_method=pm,
-                    setup_future_usage="off_session",
-                )
-                log(f"   intent ctoken {intent_ctoken[:14]}… (off_session)")
-            except Exception as exc:  # noqa: BLE001
-                log(f"   intent ctoken 创建失败，复用原 token：{str(exc)[:70]}")
+            # 只有走 pm_ 路径时才需要另建 ctoken；卡号直传路径下 ctoken 已经
+            # 带好卡数据与 radar token，直接用，不必也不能再建（无 pm_ 会 400）。
+            if pm:
+                try:
+                    intent_ctoken = self.client.create_confirmation_token(
+                        publishable_key=self.publishable_key,
+                        payment_method=pm,
+                        setup_future_usage="off_session",
+                    )
+                    log(f"   intent ctoken {intent_ctoken[:14]}… (off_session)")
+                except Exception as exc:  # noqa: BLE001
+                    log(f"   intent ctoken 创建失败，复用原 token：{str(exc)[:70]}")
             http_status, final = self.confirm_intent_raw(
                 intent_id=intent_id,
                 client_secret=intent_secret,
@@ -644,7 +647,9 @@ class PlusProtocol:
                     log(f"   Stripe {http_status}：{msg[:90]}")
                 return out
 
-            final_scanned = StripeProtocol.classify({"status": 200, "body": final}, None)
+            import json as _json
+            log(f"   ⑤ 原始响应 HTTP {http_status}: {_json.dumps(final, ensure_ascii=False)[:600]}")
+            final_scanned = StripeProtocol.classify({"status": http_status, "body": final}, None)
             out.code = final_scanned.code or out.code
             out.decline_code = final_scanned.decline_code or out.decline_code
             out.message = final_scanned.message or out.message
