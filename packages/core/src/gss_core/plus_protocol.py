@@ -103,6 +103,8 @@ class PlusProtocol:
                 "host.docker.internal", "127.0.0.1")
         self._hcap_sitekey = "24ed0064-62cf-4d42-9960-5dd1a41d4e29"
         self._hcap_token = ""
+        # 真实 site_key / rqdata 由 elements/sessions 的 passive_captcha 下发
+        self._hcap_rqdata = ""
         self._t0 = 0.0
         self.cuss_secret = customer_session_client_secret or ""
         self._elements_session_id = ""
@@ -287,6 +289,15 @@ class PlusProtocol:
             j = r.json() if r.content else {}
             sid = str(j.get("session_id") or "")
             self._elements_session_id = sid
+            # passive_captcha 是 Stripe 下发的 hCaptcha 配置（前端同源使用）
+            cap = j.get("passive_captcha") or {}
+            sk = str(cap.get("site_key") or "")
+            rq = str(cap.get("rqdata") or "")
+            if sk:
+                self._hcap_sitekey = sk
+                self._hcap_rqdata = rq
+                log(f"   暖场 passive_captcha site_key={sk[:8]}… rqdata="
+                    f"{(rq[:12] + '…') if rq else '(空)'}")
             log(f"   暖场 elements/sessions → {sid[:28] or '(空)'}")
             return sid
         except Exception as exc:  # noqa: BLE001
@@ -385,7 +396,7 @@ class PlusProtocol:
             return ""
         payload = {
             "sitekey": self._hcap_sitekey,
-            "rqdata": "",
+            "rqdata": self._hcap_rqdata,
             "host": "b.stripecdn.com",
             "proxy": self.proxy or "",
             "ua": self.ua,
@@ -404,7 +415,7 @@ class PlusProtocol:
             j = r.json() if r.content else {}
             tok = str(j.get("token") or "")
             if tok:
-                log(f"   hcaptcha token 已获取 len={len(tok)}")
+                log(f"   hcaptcha token 已获取 len={len(tok)} sitekey={self._hcap_sitekey[:8]}")
                 return tok
             log(f"   求解器未出 token: {str(j)[:120]}")
         except Exception as exc:  # noqa: BLE001
