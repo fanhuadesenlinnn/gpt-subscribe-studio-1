@@ -128,7 +128,7 @@
   navigator.appVersion = g.__UA__.replace("Mozilla/", "");
   navigator.appName = "Netscape";
   navigator.appCodeName = "Mozilla";
-  navigator.platform = (g.__PLATFORM__ || "Win32").replace(/\s+/g, "");
+  navigator.platform = (g.__PLATFORM__ || "Win32");
   navigator.product = "Gecko";
   navigator.productSub = "20030107";
   navigator.vendor = "Google Inc.";
@@ -157,7 +157,7 @@
     var m = String(g.__UA__ || "").match(/Chrome\/(\d+)\./);
     var ver = m ? m[1] : "136";
     var plat = (g.__PLATFORM_LABEL__ || "Windows");
-    navigator.userAgentData = { brands: [{ brand: "Google Chrome", version: ver }, { brand: "Chromium", version: ver }, { brand: "Not.A/Brand", version: "99" }], mobile: false, platform: plat, getHighEntropyValues: function () { return Promise.resolve({ platform: plat, platformVersion: "10.0.0", fullVersionList: [{ brand: "Google Chrome", version: ver }, { brand: "Chromium", version: ver }, { brand: "Not.A/Brand", version: "99" }] }); } };
+    navigator.userAgentData = { brands: [{ brand: "Google Chrome", version: ver }, { brand: "Chromium", version: ver }, { brand: "Not.A/Brand", version: "99" }], mobile: false, platform: plat, getHighEntropyValues: function () { return Promise.resolve({ platform: plat, platformVersion: (plat === "Windows" ? "10.0.0" : (plat === "macOS" ? "14.6.1" : "")), fullVersionList: [{ brand: "Google Chrome", version: ver }, { brand: "Chromium", version: ver }, { brand: "Not.A/Brand", version: "99" }] }); } };
   })();
   navigator.scheduling = { isInputPending: function () { return false; } };
   navigator.ink = { requestPresenter: noopPromise };

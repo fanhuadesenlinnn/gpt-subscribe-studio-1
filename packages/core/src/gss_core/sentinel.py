@@ -79,6 +79,12 @@ def mint(
     timezone: str = "America/New_York",
     cookie_header: str = "",
     timeout_s: float = 90.0,
+    platform: str = "Linux x86_64",
+    platform_label: str = "Linux",
+    screen_w: int = 1920,
+    screen_h: int = 1080,
+    avail_h: int = 1032,
+    cores: int = 8,
 ) -> Dict[str, Any]:
     """返回哨兵 JSON；失败返回空 dict，由调用方决定是否中止。"""
 
@@ -87,7 +93,7 @@ def mint(
     payload = json.dumps(
         {
             "ua": user_agent,
-            "cores": 8,
+            "cores": cores,
             "deviceId": device_id,
             "flow": flow,
             "proxy": proxy or "",
@@ -95,11 +101,11 @@ def mint(
             "pageUrl": page_url,
             "language": language,
             "timezone": timezone,
-            "platform": "Win32",
-            "platformLabel": "Windows",
-            "screenW": 1920,
-            "screenH": 1080,
-            "availH": 1032,
+            "platform": platform,
+            "platformLabel": platform_label,
+            "screenW": screen_w,
+            "screenH": screen_h,
+            "availH": avail_h,
             "maxTouchPoints": 0,
             "cookieHeader": cookie_header,
             "sentinelOrigin": "https://chatgpt.com",

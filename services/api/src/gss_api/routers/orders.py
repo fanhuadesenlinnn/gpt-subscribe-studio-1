@@ -247,7 +247,15 @@ async def create_order(
     )
     store.create_order(order, idempotency_key)
     store.add_job(Job(order_id=order.id, stage="checkout"))
-    vault.put(order.id, OrderSecrets(session=raw_session, proxy=exit_proxy or ""))
+    # 指纹 profile：与建单 client 用同一个 device_id 推导，保证全程一致
+    try:
+        from gss_core.chatgpt import _pick_profile as _pick_prof
+        _dev = getattr(bundle, "device_id", "") or ""
+        _profile = _pick_prof(_dev)
+    except Exception:
+        _profile = None
+    vault.put(order.id, OrderSecrets(session=raw_session, proxy=exit_proxy or "",
+                                  profile=_profile))
 
     pipeline = build_pipeline()
     try:
@@ -336,15 +344,11 @@ async def _mark_delivered(order_id: str) -> None:
 def _team_client(secrets: OrderSecrets, country: str = "") -> ChatGPTClient:
     """Build a client for this order, optionally exiting from the billing country.
 
-    A Team checkout may be created for one region while the card is billed to
-    another; Stripe then expects the payment requests to exit from the billing
-    country, so the exit is realigned for those calls only.
+    支付出口必须与创建结账时完全一致：Stripe 把 checkout session 绑定在
+    创建时的出口上，按账单国家重新对齐会换掉 IP，导致验证码/风控判定异常。
+    country 参数保留仅为兼容既有调用方，不再参与出口选择。
     """
-    proxy = secrets.proxy or ""
-    want = str(country or "").strip().upper()
-    if proxy and want:
-        proxy = align_proxy_region(proxy, want) or proxy
-    client = ChatGPTClient.from_raw_session(secrets.session, proxy=proxy or None)
+    client = ChatGPTClient.from_raw_session(secrets.session, proxy=secrets.proxy or None)
     client.timeout = 30.0
     return client
 
@@ -886,6 +890,7 @@ async def pay_order_protocol(order_id: str, payload: ProtocolPayRequest) -> Prot
                 session=session_raw, checkout_url=checkout_url,
                 publishable_key=publishable_key, card=card, billing=billing,
                 proxy=proxy, currency=currency,
+                profile=getattr(secrets, "profile", None),
             )
             # 浏览器 Stripe 输入框已换好 pm_ 时复用它，服务端不再提交卡号
             pp.external_pm = pm_id
@@ -894,6 +899,7 @@ async def pay_order_protocol(order_id: str, payload: ProtocolPayRequest) -> Prot
         sp = StripeProtocol(
             proxy=proxy, captcha_key=captcha_key, captcha_url=captcha_url,
             card=card, billing=billing,
+            profile=getattr(secrets, "profile", None),
         )
         # 默认全关（批量模式）；网页上勾选后逐项打开
         sp.step_fingerprint = payload.steps.fingerprint

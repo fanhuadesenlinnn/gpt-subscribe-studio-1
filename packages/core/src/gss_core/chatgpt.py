@@ -24,14 +24,101 @@ from gss_core.session_token import SessionBundle, parse_session_bundle
 APP_BASE = "https://chatgpt.com"
 ACCOUNTS_CHECK_PATH = "/backend-api/accounts/check/v4-2023-04-27"
 STRIPE_BASE = "https://api.stripe.com"
-_IMPERSONATE = "chrome136"
+_IMPERSONATE = "chrome150"
 _CLIENT_VERSION = "prod-db390ebea64862bf1899c420a4c736e0cf639747"
 _CLIENT_BUILD = "7904904"
-_CHROME = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
-)
-_SEC_CH_UA = '"Google Chrome";v="136", "Not.A/Brand";v="8", "Chromium";v="136"'
+# ── 真实 Chrome 146-150 profile（versionhistory.googleapis.com）──────────
+_PROFILES = {
+    "windows": {
+        "builds": ["150.0.7871.189", "149.0.7827.201", "148.0.7778.218",
+                   "147.0.7727.139", "146.0.7680.180",
+                   "150.0.7871.187", "149.0.7827.199", "148.0.7778.216",
+                   "147.0.7727.137", "146.0.7680.178"],
+        "platform": "Win32",
+        "label": "Windows",
+        "screen": (1920, 1080, 1032),
+        "ua": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+               "AppleWebKit/537.36 (KHTML, like Gecko) "
+               "Chrome/{build} Safari/537.36"),
+        "hints": {
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-ch-ua-platform-version": '"10.0.0"',
+            "sec-ch-ua-arch": '"x86"',
+            "sec-ch-ua-bitness": '"64"',
+        },
+    },
+    "macos": {
+        "builds": ["150.0.7871.189", "149.0.7827.201", "148.0.7778.217",
+                   "147.0.7727.139", "146.0.7680.180",
+                   "150.0.7871.187", "149.0.7827.199", "148.0.7778.215",
+                   "147.0.7727.137", "146.0.7680.177"],
+        "platform": "MacIntel",
+        "label": "macOS",
+        "screen": (1512, 982, 938),
+        "ua": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+               "AppleWebKit/537.36 (KHTML, like Gecko) "
+               "Chrome/{build} Safari/537.36"),
+        "hints": {
+            "sec-ch-ua-platform": '"macOS"',
+            "sec-ch-ua-platform-version": '"14.6.1"',
+            "sec-ch-ua-arch": '"arm"',
+            "sec-ch-ua-bitness": '"64"',
+        },
+    },
+    "linux": {
+        "builds": ["150.0.7871.186", "149.0.7827.200", "148.0.7778.215",
+                   "147.0.7727.137", "146.0.7680.177",
+                   "150.0.7871.181", "149.0.7827.196", "148.0.7778.178",
+                   "147.0.7727.116", "146.0.7680.164"],
+        "platform": "Linux x86_64",
+        "label": "Linux",
+        "screen": (1920, 1080, 1053),
+        "ua": ("Mozilla/5.0 (X11; Linux x86_64) "
+               "AppleWebKit/537.36 (KHTML, like Gecko) "
+               "Chrome/{build} Safari/537.36"),
+        "hints": {"sec-ch-ua-platform": '"Linux"'},
+    },
+}
+
+# 加权：Windows 占真实用户多数
+_PROFILE_ORDER = ["windows", "windows", "windows", "macos", "macos", "linux"]
+
+
+def _hash8(seed: str, salt: str = "") -> int:
+    import hashlib as _hl
+    return int(_hl.sha256((str(seed) + salt).encode("utf-8")).hexdigest()[:8], 16)
+
+
+def _pick_profile(device_id: str) -> dict:
+    """按 device_id 稳定选定平台与版本，同一账号永远同一组合。"""
+    seed = str(device_id or "anon")
+    key = _PROFILE_ORDER[_hash8(seed, "os") % len(_PROFILE_ORDER)]
+    prof = dict(_PROFILES[key])
+    prof["key"] = key
+    prof["build"] = prof["builds"][_hash8(seed, "b") % len(prof["builds"])]
+    return prof
+
+
+def _profile_from_ua(ua: str) -> dict:
+    """兼容旧调用：从 UA 推导 platform / 屏幕 / 核心数。"""
+    low = (ua or "").lower()
+    if "windows" in low:
+        return {"platform": "Win32", "platform_label": "Windows",
+                "screen_w": 1920, "screen_h": 1080, "avail_h": 1032, "cores": 8}
+    if "macintosh" in low or "mac os x" in low:
+        return {"platform": "MacIntel", "platform_label": "macOS",
+                "screen_w": 1512, "screen_h": 982, "avail_h": 938, "cores": 8}
+    return {"platform": "Linux x86_64", "platform_label": "Linux",
+            "screen_w": 1920, "screen_h": 1080, "avail_h": 1053, "cores": 8}
+
+
+def _ua_mac(build: str) -> str:
+    """兼容旧调用：默认 Linux UA。"""
+    return _PROFILES["linux"]["ua"].format(build=build)
+
+
+_CHROME = _PROFILES["linux"]["ua"].format(build=_PROFILES["linux"]["builds"][0])
+_SEC_CH_UA = '"Google Chrome";v="150", "Chromium";v="150", "Not(A:Brand";v="24"'
 
 STRIPE_API_VERSION = "2025-03-31.basil"
 STRIPE_CHECKOUT_API_VERSION = (
@@ -355,7 +442,7 @@ def _new_session(*, proxy: Optional[str], timeout: float, impersonate: str = _IM
     try:
         session = CurlSession(impersonate=impersonate, timeout=timeout)
     except Exception:
-        session = CurlSession(impersonate="chrome136", timeout=timeout)
+        session = CurlSession(impersonate="chrome150", timeout=timeout)
     if hasattr(session, "trust_env"):
         session.trust_env = False
     proxy = str(proxy or "").strip()
@@ -411,9 +498,38 @@ class ChatGPTClient:
             values["oai-did"] = self.device_id
         return "; ".join(f"{name}={value}" for name, value in values.items() if name and value is not None)
 
+    @property
+    def profile(self) -> dict:
+        return _pick_profile(getattr(self, "device_id", "") or "")
+
+    @property
+    def chrome_build(self) -> str:
+        return self.profile["build"]
+
+    @property
+    def chrome_major(self) -> str:
+        return self.chrome_build.split(".", 1)[0]
+
+    @property
+    def sec_ch_ua(self) -> str:
+        major = self.chrome_major
+        return ('"Google Chrome";v="' + major + '", "Chromium";v="' + major
+                + '", "Not(A:Brand";v="24"')
+
+    @property
+    def ua(self) -> str:
+        return self.profile["ua"].format(build=self.chrome_build)
+
+    @property
+    def sentinel_profile(self) -> dict:
+        p = self.profile
+        return {"platform": p["platform"], "platform_label": p["label"],
+                "screen_w": p["screen"][0], "screen_h": p["screen"][1],
+                "avail_h": p["screen"][2], "cores": 8}
+
     def _identity_headers(self) -> Dict[str, str]:
         headers = {
-            "User-Agent": _CHROME,
+            "User-Agent": self.ua,
             "Accept": "*/*",
             "Accept-Language": f"{self.language},{self.language.split('-')[0]};q=0.9,en;q=0.8",
             "Authorization": f"Bearer {self.access_token}",
@@ -430,9 +546,9 @@ class ChatGPTClient:
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-origin",
-            "sec-ch-ua": _SEC_CH_UA,
+            "sec-ch-ua": self.sec_ch_ua,
             "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
+            **self.profile["hints"],
             "Cookie": self._cookie_header(),
         }
         if not self.access_token:
@@ -552,13 +668,14 @@ class ChatGPTClient:
         token = mint(
             flow=flow,
             device_id=self.device_id,
-            user_agent=_CHROME,
+            user_agent=self.ua,
             proxy=self.proxy or "",
             page_url=page_url or f"{APP_BASE}/",
             language=self.language,
             timezone=self.timezone,
             cookie_header=self._cookie_header(),
             timeout_s=max(30.0, min(self.timeout, 90.0)),
+            **self.sentinel_profile,
         )
         value = header_value(token)
         if not value:
@@ -610,7 +727,7 @@ class ChatGPTClient:
             self._stripe_http = _new_session(proxy=self.proxy, timeout=self.timeout)
             self._stripe_http.headers.update(
                 {
-                    "User-Agent": _CHROME,
+                    "User-Agent": self.ua,
                     "Origin": "https://js.stripe.com",
                     "Referer": "https://js.stripe.com/",
                     "Content-Type": "application/x-www-form-urlencoded",
@@ -951,8 +1068,15 @@ class ChatGPTClient:
         self,
         *,
         publishable_key: str,
-        payment_method: str,
+        payment_method: str = "",
         setup_future_usage: Optional[str] = "off_session",
+        card: Optional[Dict[str, Any]] = None,
+        billing: Optional[Dict[str, Any]] = None,
+        radar_token: str = "",
+        time_on_page_ms: int = 0,
+        client_session_id: str = "",
+        customer_id: str = "",
+        currency: str = "",
     ) -> str:
         """创建 confirmation token。
 
@@ -962,13 +1086,61 @@ class ChatGPTClient:
             off_session + true     表示保存卡片
             None        + 不带该字段  表示不保存
         """
-        body = {
+        body: Dict[str, Any] = {
             "key": publishable_key,
-            "payment_method": payment_method,
             "_stripe_version": STRIPE_API_VERSION,
         }
         if setup_future_usage:
             body["setup_future_usage"] = setup_future_usage
+
+        if card and card.get("number"):
+            # 对齐真实浏览器（HAR）：卡号直接交给 confirmation_tokens，
+            # 而不是先造 pm_ 再传引用。
+            b = dict(billing or {})
+            import uuid as _uuid
+            _csid = client_session_id or str(_uuid.uuid4())
+            body["payment_method_data[type]"] = "card"
+            body["payment_method_data[card][number]"] = str(card.get("number") or "")
+            body["payment_method_data[card][cvc]"] = str(card.get("cvc") or "")
+            body["payment_method_data[card][exp_month]"] = str(card.get("exp_month") or "")
+            body["payment_method_data[card][exp_year]"] = str(card.get("exp_year") or "")
+            body["payment_method_data[allow_redisplay]"] = "always"
+            body["payment_method_data[pasted_fields]"] = "number,exp"
+            body["payment_method_data[billing_details][name]"] = str(b.get("name") or "")
+            body["payment_method_data[billing_details][email]"] = str(b.get("email") or "")
+            body["payment_method_data[billing_details][address][country]"] = str(b.get("country") or "US").upper()
+            body["payment_method_data[billing_details][address][line1]"] = str(b.get("line1") or "")
+            body["payment_method_data[billing_details][address][city]"] = str(b.get("city") or "")
+            body["payment_method_data[billing_details][address][postal_code]"] = str(
+                b.get("postal_code") or b.get("zip") or "")
+            body["payment_method_data[billing_details][address][state]"] = str(b.get("state") or "")
+            body["payment_method_data[payment_user_agent]"] = (
+                "stripe.js/7e9062bdeb; stripe-js-v3/7e9062bdeb; payment-element; deferred")
+            body["payment_method_data[referrer]"] = APP_BASE
+            body["payment_method_data[time_on_page]"] = str(int(time_on_page_ms or 45000))
+            body["payment_method_data[client_attribution_metadata][client_session_id]"] = _csid
+            body["payment_method_data[client_attribution_metadata][merchant_integration_source]"] = "elements"
+            body["payment_method_data[client_attribution_metadata][merchant_integration_subtype]"] = "payment-element"
+            body["payment_method_data[client_attribution_metadata][merchant_integration_version]"] = "2021"
+            body["payment_method_data[client_attribution_metadata][payment_intent_creation_flow]"] = "deferred"
+            body["payment_method_data[client_attribution_metadata][payment_method_selection_flow]"] = "merchant_specified"
+            body["payment_method_data[guid]"] = uuid.uuid4().hex
+            body["payment_method_data[muid]"] = uuid.uuid4().hex
+            body["payment_method_data[sid]"] = uuid.uuid4().hex
+            if radar_token:
+                body["payment_method_data[radar_options][hcaptcha_token]"] = radar_token
+            body["client_attribution_metadata[client_session_id]"] = _csid
+            body["client_attribution_metadata[merchant_integration_source]"] = "elements"
+            body["client_attribution_metadata[merchant_integration_subtype]"] = "payment-element"
+            body["client_attribution_metadata[merchant_integration_version]"] = "2021"
+            body["client_context[mode]"] = "subscription"
+            body["client_context[payment_method_types][0]"] = "card"
+            if currency:
+                body["client_context[currency]"] = currency.lower()
+            if customer_id:
+                body["client_context[customer]"] = customer_id
+        elif payment_method:
+            body["payment_method"] = payment_method
         response = self.stripe_http.post(
             f"{STRIPE_BASE}/v1/confirmation_tokens",
             data=urlencode(body),
@@ -1538,6 +1710,7 @@ class ChatGPTClient:
         payment_method: str = "",
         confirmation_token: str = "",
         return_url: str = "",
+        request_three_d_secure: str = "",
     ) -> Dict[str, Any]:
         intent_id = intent_id or intent_id_from_secret(client_secret)
         kind = "payment_intents" if intent_id.startswith("pi_") else "setup_intents"
@@ -1553,6 +1726,9 @@ class ChatGPTClient:
             body["payment_method"] = payment_method
         if return_url:
             body["return_url"] = return_url
+        if request_three_d_secure:
+            # automatic（默认）多数卡不会弹挑战；any 表示「只要卡支持就做 3DS」
+            body["payment_method_options[card][request_three_d_secure]"] = request_three_d_secure
         response = self.stripe_http.post(
             f"{STRIPE_BASE}/v1/{kind}/{intent_id}/confirm",
             data=urlencode(body),

@@ -47,13 +47,27 @@ V_ELEMENTS = "2026-03-25.dahlia"
 #: 签发 passive token 的 UA 不同，构成跨步骤的指纹矛盾。
 UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/150.0.7871.128 Safari/537.36"
 )
 RUNTIME_HASH = "5412f474d5"
 PUBLISHABLE_KEY = os.environ.get(
     "STRIPE_PUBLISHABLE_KEY",
     "pk_live_51HOrSwC6h1nxGoI3lTAgRjYVrz4dU3fVOabyCcKR3pbEJguCVAlqCxdxCUvoRh1XWwRacViovU3kLKvpkjh7IqkW00iXQsjo3n",
 )
+_DEFAULT_PROFILE = {
+    "key": "linux",
+    "build": "150.0.7871.128",
+    "platform": "Linux x86_64",
+    "label": "Linux",
+    "screen": (1920, 1080, 1053),
+    "cores": 8,
+    "ua": ("Mozilla/5.0 (X11; Linux x86_64) "
+           "AppleWebKit/537.36 (KHTML, like Gecko) "
+           "Chrome/{build} Safari/537.36"),
+    "hints": {"sec-ch-ua-platform": '"Linux"'},
+}
+
+
 STRIPE_HEADERS = {
     "User-Agent": UA,
     "Content-Type": "application/x-www-form-urlencoded",
@@ -145,8 +159,16 @@ class StripeProtocol:
         card: dict[str, str] | None = None,
         billing: dict[str, str] | None = None,
         timeout: float = 120.0,
+        profile: dict | None = None,
     ) -> None:
         self.proxy = proxy or None
+        self.locale = ""
+        self.timezone = ""
+        # 指纹必须与建单、求解器完全一致：由调用方传入同一份 profile
+        self.profile = dict(profile or _DEFAULT_PROFILE)
+        self.ua = self.profile["ua"].format(build=self.profile["build"])
+        self.platform = self.profile["platform"]
+        self.screen = tuple(self.profile["screen"])
         self.captcha_key = captcha_key
         self.captcha_url = captcha_url.rstrip("/")
         self.card = card or {}
@@ -198,7 +220,7 @@ class StripeProtocol:
                 if self.proxy:
                     proxies = {"http": self.proxy, "https": self.proxy}
                 self._client = curl_requests.Session(
-                    impersonate="chrome124",
+                    impersonate="chrome150",
                     proxies=proxies,
                     timeout=self.timeout,
                     headers={"Accept": "application/json"},
@@ -207,7 +229,7 @@ class StripeProtocol:
             else:
                 self._client = httpx.Client(
                     proxy=self.proxy, timeout=self.timeout,
-                    headers={"User-Agent": UA, "Accept": "application/json"},
+                    headers={"User-Agent": self.ua, "Accept": "application/json"},
                 )
                 log("   使用 httpx（默认 TLS 指纹）")
         return self._client
@@ -245,7 +267,7 @@ class StripeProtocol:
         if not events:
             return
         headers = {
-            "User-Agent": UA,
+            "User-Agent": self.ua,
             "Content-Type": "text/plain;charset=UTF-8",
             "Accept": "*/*",
             "Origin": "https://js.stripe.com",
@@ -271,13 +293,11 @@ class StripeProtocol:
         log("① m.stripe.com/6 注册指纹")
         guid, muid, sid = _hex_id(), _hex_id(), _hex_id()
         fp_id = os.urandom(16).hex()
-        # 真实服务器环境是 Linux，浏览器 UA 声称 Windows 会造成矛盾
-        # 这里与 UA 保持一致，用 Windows 平台串
-        platform_str = "Win32"
+        # 必须与 UA / profile 一致，否则 m.stripe.com 指纹与 UA 打架
+        platform_str = self.platform
         locale = random.choice(["en-US", "en-US", "en-US", "en-GB"])
-        sw, sh, dpr = random.choice(
-            [(1920, 1080, 1), (1536, 864, 1.25), (2560, 1440, 1), (1440, 900, 1)]
-        )
+        sw, sh = self.screen[0], self.screen[1]
+        dpr = 1
         vh = sh - random.randint(40, 70)
         cpu = random.choice([4, 8, 12, 16])
 
@@ -318,7 +338,7 @@ class StripeProtocol:
                           "t": round(random.uniform(0.6, 1.0), 1)},
                     "j": {"v": canvas_bits, "t": round(random.uniform(150, 170), 1), "at": 4},
                     "k": {"v": "", "t": 0},
-                    "l": {"v": UA, "t": 0},
+                    "l": {"v": self.ua, "t": 0},
                     "m": {"v": "", "t": round(random.uniform(0.05, 0.2), 1)},
                     "n": {"v": "false", "t": round(random.uniform(100, 130), 1), "at": 4},
                     "o": {"v": webgl_hex, "t": round(random.uniform(100, 120), 1)},
@@ -348,7 +368,7 @@ class StripeProtocol:
             }
 
         headers = {
-            "User-Agent": UA,
+            "User-Agent": self.ua,
             "Content-Type": "text/plain;charset=UTF-8",
             "Accept": "*/*",
             "Origin": "https://m.stripe.network",
@@ -472,7 +492,7 @@ class StripeProtocol:
             {"Accept": "application/json",
              "Origin": "https://js.stripe.com",
              "Referer": "https://js.stripe.com/",
-             "User-Agent": UA},
+             "User-Agent": self.ua},
         )
         ok = r.status_code == 200
         log(f"   allowed_origins → {r.status_code}")
@@ -482,6 +502,8 @@ class StripeProtocol:
         log("② init")
         js_id = str(uuid.uuid4())
         locale, tz = self._align_locale(self.proxy)
+        # 求解器必须复用同一组值（init 时已发给 Stripe）
+        self.locale, self.timezone = locale, tz
         data = {
             "browser_locale": locale,
             "browser_timezone": tz,
@@ -682,11 +704,24 @@ class StripeProtocol:
         if not self.challenge_solver_url or not site_key:
             return None
         try:
+            # 指纹必须与协议链一致：同一出口 + 同一 UA / 平台 / 屏幕
+            _ua = self.ua
+            _plat, _label = self.platform, self.profile.get("label", "Linux")
+            _scr = self.screen
             payload = {
                 "sitekey": site_key,
                 "rqdata": rqdata,
                 "proxy": self.proxy or "",
                 "host": "b.stripecdn.com",
+                "ua": _ua,
+                "platform": _plat,
+                "platform_label": _label,
+                "screen_w": _scr[0],
+                "screen_h": _scr[1],
+                "avail_h": _scr[2],
+                "cores": 8,
+                "locale": getattr(self, "locale", "en-US"),
+                "timezone": getattr(self, "timezone", "America/New_York"),
             }
             r = httpx.post(
                 f"{self.challenge_solver_url}/solve", json=payload,

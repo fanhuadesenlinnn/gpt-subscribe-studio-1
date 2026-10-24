@@ -73,6 +73,8 @@ class PlusProtocol:
         proxy: Optional[str] = None,
         currency: str = "USD",
         timeout: float = 120.0,
+        profile: Optional[Dict[str, Any]] = None,
+        customer_session_client_secret: str = "",
     ) -> None:
         self.session = session or ""
         self.checkout_url = checkout_url or ""
@@ -80,6 +82,30 @@ class PlusProtocol:
         self.card = card or {}
         self.billing = billing or {}
         self.proxy = proxy or None
+        # 指纹必须与建单、求解器完全一致
+        self.profile = dict(profile or {})
+        if self.profile:
+            self.ua = self.profile["ua"].format(build=self.profile["build"])
+            self.platform = self.profile.get("platform", "Linux x86_64")
+            self.screen = tuple(self.profile.get("screen", (1920, 1080, 1053)))
+        else:
+            self.ua = STRIPE_HEADERS.get("User-Agent", "")
+            self.platform = "Linux x86_64"
+            self.screen = (1920, 1080, 1053)
+        self.headers = {**STRIPE_HEADERS, "User-Agent": self.ua}
+        import os as _os
+        self.solver_url = _os.environ.get("GSS_LLM_SOLVER_URL", "").rstrip("/")
+        if "host.docker.internal" in self.solver_url:
+            # 宿主机脚本用 127.0.0.1（容器内才认 host.docker.internal）
+            self.solver_url = self.solver_url.replace(
+                "host.docker.internal", "127.0.0.1")
+        self._hcap_sitekey = "24ed0064-62cf-4d42-9960-5dd1a41d4e29"
+        self._hcap_token = ""
+        self._t0 = 0.0
+        self.cuss_secret = customer_session_client_secret or ""
+        self._elements_session_id = ""
+        import os as _os3
+        self.three_ds = _os3.environ.get("GSS_REQUEST_3DS", "any")
         self.currency = (currency or "USD").upper()
         self.timeout = timeout
         self.payment_method_id = ""
@@ -118,7 +144,7 @@ class PlusProtocol:
                 timeout=self.timeout,
                 verify=False,
                 headers={
-                    **STRIPE_HEADERS,
+                    **self.headers,
                     "Origin": "https://js.stripe.com",
                     "Referer": "https://js.stripe.com/",
                 },
@@ -195,7 +221,8 @@ class PlusProtocol:
 
     # ── ⑤ Stripe 侧确认（保留原始响应，拒卡原因不丢）──────
     def confirm_intent_raw(
-        self, *, intent_id: str, client_secret: str, ctoken: str, return_url: str
+        self, *, intent_id: str, client_secret: str, ctoken: str, return_url: str,
+        request_three_d_secure: str = "",
     ) -> tuple[int, Dict[str, Any]]:
         kind = "payment_intents" if intent_id.startswith("pi_") else "setup_intents"
         body: Dict[str, str] = {
@@ -228,6 +255,160 @@ class PlusProtocol:
             save_choice=save_choice,
         )
 
+    # ── 暖场（对齐真实浏览器的会话行为，降低 Radar 风险分）──────
+    def _warm_elements_session(self) -> str:
+        """GET /v1/elements/sessions —— Elements 会话初始化。"""
+        if not self.cuss_secret:
+            return ""
+        try:
+            params = {
+                "client_betas[0]": "elements_link_signup_beta_1",
+                "customer_session_client_secret": self.cuss_secret,
+                "deferred_intent[mode]": "subscription",
+                "deferred_intent[currency]": (self.currency or "USD").lower(),
+                "deferred_intent[setup_future_usage]": "off_session",
+                "deferred_intent[payment_method_types][0]": "card",
+                "deferred_intent[payment_method_types][1]": "link",
+                "currency": (self.currency or "USD").lower(),
+                "key": self.publishable_key,
+                "_stripe_version": "2025-03-31.basil",
+                "elements_init_source": "stripe.elements",
+                "referrer_host": "chatgpt.com",
+                "stripe_js_id": str(uuid.uuid4()),
+                "locale": (self.profile or {}).get("locale", "en-US"),
+                "browser_timezone": (self.profile or {}).get("timezone", "America/New_York"),
+                "type": "deferred_intent",
+            }
+            r = self.client.stripe_http.get(
+                "https://api.stripe.com/v1/elements/sessions", params=params,
+                timeout=self.timeout)
+            j = r.json() if r.content else {}
+            sid = str(j.get("session_id") or "")
+            self._elements_session_id = sid
+            log(f"   暖场 elements/sessions → {sid[:28] or '(空)'}")
+            return sid
+        except Exception as exc:  # noqa: BLE001
+            log(f"   暖场 elements 失败: {str(exc)[:70]}")
+            return ""
+
+    def _warm_consumers_lookup(self) -> None:
+        """POST /v1/consumers/sessions/lookup —— 消费者会话查找。"""
+        try:
+            body = {
+                "request_surface": "web_payment_element",
+                "email_address": str((self.billing or {}).get("email") or ""),
+                "email_source": "default_value",
+                "session_id": self._elements_session_id or str(uuid.uuid4()),
+                "key": self.publishable_key,
+            }
+            self.client.stripe_http.post(
+                "https://api.stripe.com/v1/consumers/sessions/lookup",
+                data=urlencode(body), timeout=self.timeout)
+            log("   暖场 consumers/sessions/lookup")
+        except Exception as exc:  # noqa: BLE001
+            log(f"   暖场 consumers 失败: {str(exc)[:70]}")
+
+    def _warm_card_metadata(self) -> None:
+        """GET /edge-internal/card-metadata —— 卡 BIN 识别。"""
+        num = str((self.card or {}).get("number") or "").replace(" ", "")
+        if len(num) < 6:
+            return
+        try:
+            self.client.stripe_http.get(
+                "https://api.stripe.com/edge-internal/card-metadata",
+                params={"bin_prefix": num[:6], "key": self.publishable_key,
+                        "_stripe_version": "2025-03-31.basil"},
+                timeout=self.timeout)
+            log(f"   暖场 card-metadata bin={num[:6]}")
+        except Exception as exc:  # noqa: BLE001
+            log(f"   暖场 card-metadata 失败: {str(exc)[:70]}")
+
+    def _warm_taxes(self) -> None:
+        """POST /backend-api/payments/checkout/taxes —— 算税。"""
+        b = self.billing or {}
+        try:
+            payload = {
+                "checkout_session_id": self.checkout_id,
+                "processor_entity": "openai_llc",
+                "billing_country": str(b.get("country") or "US").upper(),
+                "billing_name": str(b.get("name") or ""),
+                "billing_address": {
+                    "line1": str(b.get("line1") or ""),
+                    "line2": "",
+                    "city": str(b.get("city") or ""),
+                    "country": str(b.get("country") or "US").upper(),
+                    "postal_code": str(b.get("postal_code") or b.get("zip") or ""),
+                    "state": str(b.get("state") or ""),
+                },
+                "currency": (self.currency or "USD").lower(),
+                "checkout_email": str(b.get("email") or ""),
+            }
+            self.client.http.post(
+                f"https://chatgpt.com/backend-api/payments/checkout/taxes",
+                json=payload,
+                headers=self.client._route_headers(
+                    "/backend-api/payments/checkout/taxes",
+                    page_url=self.checkout_url),
+                timeout=self.timeout)
+            log("   暖场 checkout/taxes")
+        except Exception as exc:  # noqa: BLE001
+            log(f"   暖场 taxes 失败: {str(exc)[:70]}")
+
+    def _warm_tax_id(self) -> None:
+        """POST /backend-api/payments/checkout/update_tax_id。"""
+        try:
+            self.client.http.post(
+                f"https://chatgpt.com/backend-api/payments/checkout/update_tax_id",
+                json={"checkout_session_id": self.checkout_id, "tax_id_info": None},
+                headers=self.client._route_headers(
+                    "/backend-api/payments/checkout/update_tax_id",
+                    page_url=self.checkout_url),
+                timeout=self.timeout)
+            log("   暖场 update_tax_id")
+        except Exception as exc:  # noqa: BLE001
+            log(f"   暖场 tax_id 失败: {str(exc)[:70]}")
+
+    def _warmup(self) -> None:
+        """按 HAR 顺序跑完暖场，任何一步失败都不阻断。"""
+        log("①b 暖场（对齐真实浏览器会话行为）")
+        self._warm_elements_session()
+        self._warm_consumers_lookup()
+        self._warm_card_metadata()
+        self._warm_taxes()
+        self._warm_tax_id()
+
+    def _hcaptcha_token(self) -> str:
+        """向求解器要一个 passive hCaptcha token（对齐 HAR 的 radar_options）。"""
+        if not self.solver_url:
+            return ""
+        payload = {
+            "sitekey": self._hcap_sitekey,
+            "rqdata": "",
+            "host": "b.stripecdn.com",
+            "proxy": self.proxy or "",
+            "ua": self.ua,
+            "platform": self.platform,
+            "platform_label": (self.profile or {}).get("label", "Linux"),
+            "screen_w": self.screen[0],
+            "screen_h": self.screen[1],
+            "avail_h": self.screen[2],
+            "cores": 8,
+            "locale": (self.profile or {}).get("locale", "en-US"),
+            "timezone": (self.profile or {}).get("timezone", "America/New_York"),
+        }
+        try:
+            r = httpx.post(f"{self.solver_url}/solve", json=payload,
+                           timeout=httpx.Timeout(180.0, connect=15.0))
+            j = r.json() if r.content else {}
+            tok = str(j.get("token") or "")
+            if tok:
+                log(f"   hcaptcha token 已获取 len={len(tok)}")
+                return tok
+            log(f"   求解器未出 token: {str(j)[:120]}")
+        except Exception as exc:  # noqa: BLE001
+            log(f"   求解器异常: {str(exc)[:100]}")
+        return ""
+
     def _confirm_with_ctoken(self, pm: str) -> tuple[Dict[str, Any], str]:
         """ctoken 的 setup_future_usage 与 confirm 的保存选择必须一致。
 
@@ -236,16 +417,30 @@ class PlusProtocol:
             new_card_save_choice_required
         """
         combos: list[tuple[Optional[str], Optional[bool]]] = [
-            (None, None),             # ChatGPT 侧接受这种（不带保存声明）
-            ("off_session", True),    # 保存卡片（跨会话）
-            ("on_session", True),     # 保存卡片（仅本次会话）
+            ("off_session", True),    # 必须匹配 PI 上的值，否则 400
+            (None, None),
         ]
         last: Optional[DomainError] = None
+        _tok_cached = self._hcaptcha_token() if not pm else ""
+        if not pm and not _tok_cached:
+            # 没有 token 就不提交：带上无效/缺失 token 的请求会被 ChatGPT 侧
+            # 直接判 blocked，给出误导性的「拒绝确认」，掩盖真实原因。
+            raise DomainError(
+                ErrorCode.CHECKOUT_UPSTREAM_ERROR,
+                "未能获取 hCaptcha 令牌，已终止（未提交任何支付请求）。"
+                "请检查求解器服务是否可用。",
+            )
         for setup, save in combos:
+            _tok = _tok_cached
             ctoken = self.client.create_confirmation_token(
                 publishable_key=self.publishable_key,
                 payment_method=pm,
                 setup_future_usage=setup,
+                card=(None if pm else self.card),
+                billing=(None if pm else self.billing),
+                radar_token=_tok,
+                time_on_page_ms=int((__import__("time").time() - (self._t0 or 0)) * 1000),
+                currency=self.currency,
             )
             log(f"   ctoken {ctoken[:14]}… (setup_future_usage={setup}, save={save})")
             try:
@@ -274,15 +469,25 @@ class PlusProtocol:
         except Exception as exc:  # noqa: BLE001
             log(f"   Sentinel 未拿到，继续：{str(exc)[:100]}")
 
-        # ② pm_（浏览器已产出则复用，服务端不再碰卡号）
+        import time as _time
+        self._t0 = _time.time()
+
+        # ①b 暖场：让 Radar 看到真实会话该有的请求序列
+        try:
+            self._warmup()
+        except Exception as exc:  # noqa: BLE001
+            log(f"   暖场整体失败，继续：{str(exc)[:70]}")
+
+        # ② 对齐 HAR：卡号直接交给 confirmation_tokens，不先造 pm_
+        pm = ""
         if self.external_pm:
             pm = self.external_pm
             self.payment_method_id = pm
             log(f"② 复用浏览器产出的 {pm[:14]}…")
         else:
-            pm = self.create_payment_method()
+            log("② 跳过 payment_methods，卡号直传 confirmation_tokens（对齐 HAR）")
 
-        # ③ ctoken_ + ④ confirm（两者的「保存选择」必须配对）
+        # ③ ctoken_ + ④ confirm
         log("③ confirmation_tokens + ④ checkout/confirm")
         confirmed, ctoken = self._confirm_with_ctoken(pm)
 

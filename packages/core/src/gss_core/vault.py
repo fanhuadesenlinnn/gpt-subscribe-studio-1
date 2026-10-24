@@ -25,6 +25,8 @@ class OrderSecrets:
     client_version: str = ""
     oai_session_id: str = ""
     proxy: str = ""
+    # 建单时选定的指纹 profile，支付与求解器必须复用同一份
+    profile: Optional[Dict[str, Any]] = None
     billing: Dict[str, str] = field(default_factory=dict)
     team_context: Optional[Dict[str, Any]] = None
     expires_at: datetime = field(default_factory=lambda: _utcnow() + timedelta(minutes=30))
