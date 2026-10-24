@@ -95,8 +95,10 @@ class PlusProtocol:
         self.headers = {**STRIPE_HEADERS, "User-Agent": self.ua}
         import os as _os
         self.solver_url = _os.environ.get("GSS_LLM_SOLVER_URL", "").rstrip("/")
-        if "host.docker.internal" in self.solver_url:
-            # 宿主机脚本用 127.0.0.1（容器内才认 host.docker.internal）
+        if ("host.docker.internal" in self.solver_url
+                and not _os.path.exists("/.dockerenv")):
+            # 仅宿主机脚本需要换（容器内 host.docker.internal 才是对的；
+            # 换了会指向容器自己，导致 Connection refused）
             self.solver_url = self.solver_url.replace(
                 "host.docker.internal", "127.0.0.1")
         self._hcap_sitekey = "24ed0064-62cf-4d42-9960-5dd1a41d4e29"
