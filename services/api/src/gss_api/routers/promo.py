@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio as _asyncio
+
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
@@ -52,15 +54,26 @@ def _error(exc: DomainError) -> HTTPException:
 )
 async def promo_eligibility(payload: PromoEligibilityRequest) -> PromoEligibilityOut:
     pipeline = build_pipeline()
-    try:
-        result = await pipeline.deps.account.promo_eligibility(payload.session.strip())
-    except DomainError as exc:
-        raise _error(exc)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=ErrorOut(code=str(ErrorCode.INVALID_SESSION), message=str(exc)).model_dump(),
-        )
+    result = None
+    for _attempt in range(3):
+        try:
+            result = await pipeline.deps.account.promo_eligibility(payload.session.strip())
+            break
+        except DomainError as exc:
+            raise _error(exc)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=ErrorOut(code=str(ErrorCode.INVALID_SESSION), message=str(exc)).model_dump(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            if not any(k in str(exc) for k in (
+                    "SSL", "EOF", "ConnectError", "Connection closed",
+                    "CurlError", "TLS", "timed out", "reset by peer")):
+                raise
+            if _attempt == 2:
+                raise
+            await _asyncio.sleep(2)
     return PromoEligibilityOut(
         account_id=result.account_id,
         current_plan_type=result.current_plan_type,

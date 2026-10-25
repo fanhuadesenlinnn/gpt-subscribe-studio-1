@@ -137,6 +137,46 @@ def _from_domain(exc: DomainError) -> HTTPException:
     return _error(status_code, exc.code, exc.message)
 
 
+_PROXY_ERR_HINTS = (
+    "SSL", "EOF", "ConnectError", "Connection closed", "CurlError",
+    "TLS", "timed out", "Timeout", "reset by peer",
+)
+
+
+def _is_proxy_error(exc: Exception) -> bool:
+    return any(k in str(exc) for k in _PROXY_ERR_HINTS)
+
+
+async def _create_checkout_with_retry(pipeline, *, proxy: str, **kwargs):
+    """出口代理断连时换 SID 重试建单。
+
+    返回 (checkout, 实际使用的 proxy)。调用方必须把返回的 proxy 存进 vault，
+    否则支付会用回旧的（已失效的）出口，造成跨步骤指纹矛盾。
+    """
+    from gss_core.proxies import rotate_proxy_sid
+
+    current = proxy
+    last: Exception | None = None
+    for attempt in range(3):
+        try:
+            checkout = await pipeline.create_checkout(proxy=current, **kwargs)
+            return checkout, current
+        except DomainError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            if not _is_proxy_error(exc):
+                raise
+            last = exc
+            if attempt == 2:
+                break
+            logger.info("checkout_proxy_retry attempt=%d", attempt + 1)
+            current = rotate_proxy_sid(current) if current else current
+            await asyncio.sleep(2)
+    raise last if last else DomainError(
+        ErrorCode.CHECKOUT_UPSTREAM_ERROR, "建单重试失败"
+    )
+
+
 @router.post(
     "/orders",
     status_code=status.HTTP_201_CREATED,
@@ -256,15 +296,17 @@ async def create_order(
         _profile = None
     vault.put(order.id, OrderSecrets(session=raw_session, proxy=exit_proxy or "",
                                   profile=_profile))
+    # 建单重试可能换了 SID —— 用最终生效的出口覆盖，保证支付同出口
 
     pipeline = build_pipeline()
     try:
-        checkout = await pipeline.create_checkout(
+        checkout, exit_proxy = await _create_checkout_with_retry(
+            pipeline,
+            proxy=exit_proxy or "",
             session=raw_session,
             plan=plan,
             billing_country=country,
             mode=mode,
-            proxy=exit_proxy,
             promo_code=promo_code,
             promo_campaign_id=promo_campaign_id,
             workspace_name=workspace,
@@ -282,6 +324,12 @@ async def create_order(
             exc.message,
         )
         raise _from_domain(exc)
+
+    # 建单最终生效的出口：重试可能换过 SID，支付必须复用
+    _s = vault.get(order.id)
+    if _s is not None:
+        _s.proxy = exit_proxy or ""
+        vault.put(order.id, _s)
 
     view = store.view(order.id)
     view.checkout_url = checkout.checkout_url
