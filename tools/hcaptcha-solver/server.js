@@ -77,6 +77,8 @@ const DEFAULT_HOST = process.env.HCAPTCHA_HOST || 'b.stripecdn.com';
 const TOKEN_TIMEOUT_MS = Number(process.env.TOKEN_TIMEOUT_MS || 90000);
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 600000);
 const MAX_SESSIONS = Number(process.env.MAX_SESSIONS || 8);
+// 调试产物目录（截图/题目），可用 GSS_ARTIFACT_DIR 覆盖
+const ART_DIR = process.env.GSS_ARTIFACT_DIR || '/opt/gss/data';
 // YesCaptcha 打码（答题产品 HCaptchaClassification）
 const CAPTCHA_KEY = process.env.GSS_CAPTCHA_API_KEY || process.env.YESCAPTCHA_KEY || '';
 const CAPTCHA_URL = process.env.YESCAPTCHA_URL || 'https://api.yescaptcha.com';
@@ -2196,18 +2198,18 @@ const server = http.createServer(async (req, res) => {
           if (anchors.length) task.anchors = anchors;
 
           try {
-            require('fs').writeFileSync('/opt/gss/data/q_last_meta.json', JSON.stringify({
+            require('fs').writeFileSync(`${ART_DIR}/q_last_meta.json`, JSON.stringify({
               page, question, mode: useGrid ? 'grid' : 'click',
               queries: task.queries.length, anchors: anchors.length }));
             task.queries.forEach((q, i) => {
               try {
-                require('fs').writeFileSync(`/opt/gss/data/q_last_${i}.jpg`,
+                require('fs').writeFileSync(`${ART_DIR}/q_last_${i}.jpg`,
                   Buffer.from(q, 'base64'));
               } catch (e) {}
             });
             anchors.forEach((a, i) => {
               try {
-                require('fs').writeFileSync(`/opt/gss/data/a_last_${i}.jpg`,
+                require('fs').writeFileSync(`${ART_DIR}/a_last_${i}.jpg`,
                   Buffer.from(a, 'base64'));
               } catch (e) {}
             });
@@ -2225,7 +2227,7 @@ const server = http.createServer(async (req, res) => {
               break;
             }
             sol = cj.solution || null;
-            try { require('fs').writeFileSync('/opt/gss/data/sol_last.json',
+            try { require('fs').writeFileSync(`${ART_DIR}/sol_last.json`,
               JSON.stringify(cj, null, 1)); } catch (e) {}
           } catch (e) {
             pages.push({ page, error: 'classify_failed', desc: String(e).slice(0, 120) });
@@ -2370,7 +2372,7 @@ const server = http.createServer(async (req, res) => {
             const buf = Buffer.from(await r.arrayBuffer());
             anchors.push(buf.toString('base64'));
             anchorMeta.push({ w: hi.w, h: hi.h, bytes: buf.length });
-            try { require('fs').writeFileSync('/opt/gss/data/last_anchor.bin', buf); } catch (e3) {}
+            try { require('fs').writeFileSync(`${ART_DIR}/last_anchor.bin`, buf); } catch (e3) {}
           } catch (e) {}
         }
 
@@ -2406,7 +2408,7 @@ const server = http.createServer(async (req, res) => {
                 clip: { x: Math.max(0, bx.x), y: Math.max(0, bx.y),
                         width: Math.min(bx.width, 2000), height: Math.min(bx.height, 2000) },
               });
-              require('fs').writeFileSync('/opt/gss/data/last_shot.png', png);
+              require('fs').writeFileSync(`${ART_DIR}/last_shot.png`, png);
             }
           }
         } catch (e4) {}
@@ -2463,12 +2465,12 @@ const server = http.createServer(async (req, res) => {
           const dr = await s.drawnImages();
           drawnMeta = dr.map((d) => ({ w: d.w, h: d.h, len: d.url ? d.url.length : 0, dest: d.dest }));
           if (dr.length) {
-            try { require('fs').writeFileSync('/opt/gss/data/drawn_meta.json',
+            try { require('fs').writeFileSync(`${ART_DIR}/drawn_meta.json`,
               JSON.stringify(drawnMeta)); } catch (e5) {}
             // 落盘前 12 张原图，便于人工核对
             dr.slice(0, 12).forEach((d, i) => {
               try {
-                require('fs').writeFileSync(`/opt/gss/data/drawn_${i}.jpg`,
+                require('fs').writeFileSync(`${ART_DIR}/drawn_${i}.jpg`,
                   Buffer.from(String(d.url).split(',').pop(), 'base64'));
               } catch (e6) {}
             });
@@ -2477,7 +2479,7 @@ const server = http.createServer(async (req, res) => {
         try {
           const cvj = ch && (ch.canvases || [])[0] && (ch.canvases || [])[0].jpg;
           if (cvj) {
-            require('fs').writeFileSync('/opt/gss/data/cap_canvas.jpg',
+            require('fs').writeFileSync(`${ART_DIR}/cap_canvas.jpg`,
               Buffer.from(String(cvj).split(',').pop(), 'base64'));
           }
         } catch (e) {}
