@@ -42,7 +42,7 @@
 `pasted_fields=number`、`time_on_page`、`setup_future_usage=off_session`、
 `set_as_default_payment_method=false`、`client_context[customer]`、`client_attribution_metadata[...]`。
 
-## 3. 设备：每次随机，但内部自洽
+## 3. 设备：跟随本机，按账号持久化
 
 `gss_core/har_device.py::DeviceProfile.random()`：
 
@@ -92,6 +92,11 @@ TLS/HTTP2 指纹跟着同一份 profile 走：`curl_cffi` 的 `impersonate` 与 
 一致性由 `tests/unit/test_har_device.py` 锁定（UA build、平台 hints、屏幕几何、ID 形状、header 集合）。
 设备会写进订单上下文 `har_device`，状态查询复用同一套，不会二次换设备。
 
+### 持久化验收
+
+见上文「设备按账号持久化」。要点：`guid/muid/sid` 与 iframe origin 跟着账号走，
+`stripe_js_id`、`elements_session_id` 每次页面加载换新，`owner` 不匹配时拒绝复用。
+
 ## 4. 遥测：三段都补齐
 
 1. **`m.stripe.com/6`**（4+2 次）
@@ -106,6 +111,43 @@ TLS/HTTP2 指纹跟着同一份 profile 走：`curl_cffi` 的 `impersonate` 与 
    `/ces/v1/rgstr`（statsig，gzip body，`statsig-*` 头）+ 每次 `/sentinel/req` 后的 `/sentinel/ping`。
 
 开关：`GSS_HAR_TELEMETRY=full`（默认）/ `off`。
+
+### 验收（生产机实跑）
+
+| 目标 | 数量 | 状态 |
+|---|---|---|
+| `r.stripe.com/b` | 88 POST | 200 ×88 |
+| 事件条数 | 291 | — |
+| 唯一事件名 | 146 | — |
+| `m.stripe.com/6` | 6（v2:1 ×3、v2:2 ×1、mouse ×2） | 200 ×6 |
+| `js.stripe.com`（SDK 资源） | 3 | 200 |
+| `m.stripe.network`（指纹 iframe） | 2 | 200 |
+| `api.stripe.com` | 7×200 + 1×402 | — |
+
+复验方法：
+
+```bash
+ssh gss 'python3 /tmp/capstats.py'     # 统计 /opt/gss/logs/har-capture.jsonl
+```
+
+代价：88 次 POST 全走住宅代理，一次 1–3 秒，整条遥测 3–4 分钟。
+`GSS_HAR_TELEMETRY_BUDGET`（默认 120 秒）是硬截止，到点丢弃剩余事件，
+支付主链不再等尾巴。
+
+## 4b. 代码地图（这次新增的模块）
+
+| 文件 | 职责 | 入口 |
+|---|---|---|
+| `packages/core/src/gss_core/plus_har_protocol.py` | 逐请求复刻、金额/税费推进、ctoken 与 confirm、结果归一 | `PlusHarProtocol.pay_from_url()` |
+| `har_device.py` | 设备画像 + UA/UA-CH/TLS 绑定 + 按账号持久化 | `DeviceProfile.random()`、`device_for_account()` |
+| `har_telemetry.py` | `m.stripe.com/6`、`r.stripe.com/b`、CES、资源加载、预算 | `StripeTelemetry.register/emit_through` |
+| `stripe_events.json` | 291 条事件模板（采集值已换成占位符） | `scripts/har_extract_stripe_events.py` 生成 |
+| `checkout_protocol.py` | 引擎分流：`oaics_` → HAR，`cs_` → 旧链路，`legacy` 回退 | `run_checkout_protocol()` |
+| `saved_card_protocol.py` | 输入框模式（已有 `pm_`）的确认流程 | `run_saved_card_protocol()` |
+| `scripts/fingerprint_probe.js` | 采本机指纹写 `device.json` | `node scripts/fingerprint_probe.js` |
+| `scripts/socks_bridge.py` | HTTP CONNECT → 认证 SOCKS5 | `SOCKS_UPSTREAM=… BRIDGE_PORT=18080` |
+| `scripts/plus_har_run.py` | 不经过 API 的单机 CLI | `python scripts/plus_har_run.py` |
+| `tools/hcaptcha-solver/server.js` | 求解器：`platform`/`meta`/`locale` 透传，产物目录 `GSS_ARTIFACT_DIR` | `POST /solve` |
 
 ## 5. hCaptcha / Radar token（求解器接入）
 
@@ -257,35 +299,8 @@ ctoken 的 `guid/muid/sid` 与 `m.stripe.com/6` 返回完全一致，`config_id`
 ## 9. 未覆盖
 
 - 3DS：`requires_action` 仍归 `challenge_required`，纯协议不做验证页。
+  客户端也带不上 `payment_method_options[card][request_three_d_secure]`——`confirmation_tokens`
+  与 `payment_intents/{id}/confirm` 都返回 `parameter_unknown`，这个开关只在商户侧建 PI 时生效。
 - `ab.chatgpt.com/v1/initialize`（statsig 初始化，body 是私有编码）与 `ws.chatgpt.com` 不重放。
 - HAR 里 Stripe 的响应体（`elements/sessions`、`confirmation_tokens`、intent confirm）为空，
   字段解析按现有 Stripe 公开结构做防御式读取，缺失时不推断成功。
-
-## 遥测验收（远程实跑）
-
-在生产机上开 `GSS_HAR_CAPTURE` 跑一单，抓到的请求与 HAR 对得上：
-
-| 目标 | 数量 | 状态 |
-|---|---|---|
-| `r.stripe.com/b` | 88 POST | 200 ×88 |
-| 事件条数 | 291 | — |
-| 唯一事件名 | 146 | — |
-| `m.stripe.com/6` | 6（v2:1 ×3、v2:2 ×1、mouse ×2） | 200 ×6 |
-| `js.stripe.com`（SDK 资源） | 3 | 200 |
-| `m.stripe.network`（指纹 iframe） | 2 | 200 |
-| `api.stripe.com` | 7×200 + 1×402 | — |
-
-复验方法：
-
-```bash
-ssh gss 'python3 /tmp/capstats.py'     # 统计 /opt/gss/logs/har-capture.jsonl
-```
-
-代价：88 次 POST 全走住宅代理，一次 1–3 秒，整条遥测 3–4 分钟。
-`GSS_HAR_TELEMETRY_BUDGET`（默认 120 秒）是硬截止，到点丢弃剩余事件，
-支付主链不再等尾巴。
-
-## 设备持久化
-
-见上文「设备按账号持久化」。要点：`guid/muid/sid` 与 iframe origin 跟着账号走，
-`stripe_js_id`、`elements_session_id` 每次页面加载换新，`owner` 不匹配时拒绝复用。

@@ -374,49 +374,57 @@ pnpm --dir apps/web dev
 
 ## API
 
-均在 `/api` 前缀下，需要登录态 `__Host-gss_session`。
+均在 `/api` 前缀下，除登录外都需要 `__Host-gss_session`。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `POST` | `/orders` | 建单（plan / billing_country / session / 席位等） |
-| `GET` | `/orders/{id}` | 查单，含 `session_email` |
-| `POST` | `/orders/{id}/pay-protocol` | **协议支付**（本项目主路径） |
-| `POST` | `/orders/{id}/pay` | 编排管线支付 |
-| `POST` | `/orders/{id}/verify` | 查询订阅是否生效 |
-| `GET` | `/orders/{id}/stream` | SSE 实时状态 |
-| `POST` | `/orders/{id}/team/quote` | Team 报价 |
-| `POST` | `/orders/{id}/team/prepare` | Team 支付前准备 |
-| `POST` | `/orders/{id}/team/poll` | Team 轮询 |
-| `POST` | `/promo/eligibility` | promo 资格查询 |
-| `GET` | `/settings/proxies` | 出口网关配置 |
-| `POST` | `/settings/proxies/parse` | 解析代理串 |
-| `POST` | `/settings/proxies/{role}/test` | 测试出口连通性 |
+| `POST` | `/api/orders` | 建单（plan / billing_country / session / 席位） |
+| `GET` | `/api/orders/{id}` | 查单，含 `session_email`、金额、结账会话 |
+| `POST` | `/api/orders/{id}/bind-and-pay-protocol` | **协议支付主路径**：卡内联 + 指纹 + 遥测 + intent confirm |
+| `GET` | `/api/orders/{id}/bind-and-pay-protocol` | 查询协议支付当前状态（不重复提交） |
+| `POST` | `/api/orders/{id}/saved-card/prepare` | 输入框模式：建 SetupIntent 拿 client_secret |
+| `GET` | `/api/orders/{id}/saved-card` | 查已保存的 `pm_` |
+| `POST` | `/api/orders/{id}/saved-card/refresh-checkout` | 换了 pm_ 后刷新结账会话 |
+| `POST` | `/api/orders/{id}/pay-protocol` | 兼容入口，`oaics_` 自动转 HAR 引擎 |
+| `POST` | `/api/orders/{id}/pay` | 编排管线支付 |
+| `POST` | `/api/orders/{id}/verify` | 查询订阅是否生效 |
+| `GET` | `/api/events/orders/{id}/stream` | SSE 实时状态 |
+| `POST` | `/api/orders/{id}/team/quote` | Team 报价 |
+| `POST` | `/api/orders/{id}/team/prepare` | Team 支付前准备 |
+| `POST` | `/api/orders/{id}/team/poll` | Team 轮询 |
+| `POST` | `/api/promo/eligibility` | promo 资格查询 |
+| `GET` | `/api/settings/proxies` | 出口网关配置 |
+| `POST` | `/api/settings/proxies/parse` | 解析代理串 |
+| `POST` | `/api/settings/proxies/{role}/test` | 测试出口连通性 |
 
-`pay-protocol` 请求体：
+`bind-and-pay-protocol` 请求体：
 
 ```json
 {
-  "card": { "number": "…", "exp_month": "…", "exp_year": "…", "cvc": "…" },
+  "card": { "number": "4242424242424242", "exp_month": "12", "exp_year": "2030", "cvc": "123" },
   "billing": {
     "name": "…", "email": "…", "line1": "…",
     "city": "…", "state": "…", "postal_code": "…", "country": "US"
   },
-  "proxy": "http://user:pass@host:port",
-  "steps": { "fingerprint": false, "dwell": false, "elements": false, "tax_region": false }
+  "expected_amount": "2300",
+  "expected_currency": "USD"
 }
 ```
+
+`expected_*` 是下单页展示的金额；税后金额变化会计入返回值并回写订单。
 
 响应：
 
 ```json
 {
-  "state": "succeeded | card_declined | challenge_required | unknown",
-  "code": null,
-  "decline_code": null,
-  "message": null,
-  "intent_status": "requires_action",
-  "charge_id": null,
-  "payment_method_id": null
+  "state": "succeeded | card_declined | challenge_required | pending | unknown",
+  "stage": "checkout | payment",
+  "code": "card_declined",
+  "decline_code": "fraudulent | generic_decline | do_not_honor | …",
+  "message": "Your card was declined.",
+  "intent_status": "requires_payment_method",
+  "charge_id": "ch_…",
+  "payment_method_id": "pm_…"
 }
 ```
 
@@ -428,6 +436,12 @@ pnpm --dir apps/web dev
 packages/
   contracts/      数据模型与枚举
   core/           Stripe 协议客户端、Sentinel 桥、会话解析、代理
+    gss_core/plus_har_protocol.py   HAR 逐请求引擎（默认路径）
+    gss_core/har_device.py          设备画像：UA/UA-CH/TLS、canvas/audio、按账号持久化
+    gss_core/har_telemetry.py       m.stripe.com/6、r.stripe.com/b、CES
+    gss_core/stripe_events.json     291 条事件模板
+    gss_core/checkout_protocol.py   引擎分流（oaics_ / cs_ / legacy）
+    gss_core/saved_card_protocol.py 输入框模式（pm_）协议
 services/
   api/            FastAPI 路由与序列化
   checkout/       结账会话适配器
@@ -439,6 +453,11 @@ deploy/
   docker/         Dockerfile / compose / 部署文档
   server/         容器入口 app.py 与登录页
 scripts/          批量跑卡、探针、窗口调度
+  fingerprint_probe.js   采本机 canvas/audio/WebGL/cores/时区 → device.json
+  socks_bridge.py        本地 HTTP CONNECT → 带认证 SOCKS5（给 Chrome）
+  har_extract_stripe_events.py  从 HAR 重新生成事件模板
+  plus_har_run.py        单机 CLI（不经过 API）
+tools/hcaptcha-solver/  hCaptcha 求解器（puppeteer-core + vision_server）
 docs/             协议逆向与探索记录
 attic/            已归档的浏览器路线（不参与构建）
 ```
