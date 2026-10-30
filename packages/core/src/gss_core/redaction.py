@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, Iterable, List, Mapping, Pattern, Tuple
+from typing import Any, Iterable, List, Mapping, Pattern, Tuple
 
 MASK = "***"
 

@@ -16,15 +16,12 @@ Stripe API 版本：2025-03-31.basil
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import os
 import random
 import re
-import string
 import time
 import uuid
-from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlencode
@@ -676,7 +673,6 @@ class StripeProtocol:
             "client_attribution_metadata[merchant_integration_source]": "checkout",
             "client_attribution_metadata[merchant_integration_version]": "hosted_checkout",
             "client_attribution_metadata[payment_method_selection_flow]": "merchant_specified",
-            "client_attribution_metadata[checkout_config_id]": ctx.config_id,
         }
         if ctx.rv_timestamp:
             data["rv_timestamp"] = ctx.rv_timestamp

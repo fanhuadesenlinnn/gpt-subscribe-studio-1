@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from gss_contracts import Job, Order, OrderStatus, SubscriptionInfo
@@ -30,6 +30,7 @@ class OrderView:
     promo_campaign_id: Optional[str] = None
     price_interval: Optional[str] = None
     confirm_return_url: Optional[str] = None
+    protocol_saved_result: Optional[Dict[str, Any]] = None
 
 
 class InMemoryStore:

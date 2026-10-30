@@ -236,6 +236,7 @@ declare global {
   interface Window {
     Stripe?: (key: string) => {
       elements: (options?: unknown) => StripeElements;
+      confirmSetup?: import("./stripeSetup").StripeSetupClient["confirmSetup"];
       createConfirmationToken?: (data: unknown) => Promise<{
         confirmationToken?: { id: string };
         error?: { message?: string };

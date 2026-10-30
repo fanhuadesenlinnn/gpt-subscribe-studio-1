@@ -33,6 +33,44 @@ export interface Order {
   session_email?: string | null;
 }
 
+export type SavedCardState =
+  | "not_started"
+  | "requires_payment_method"
+  | "requires_confirmation"
+  | "requires_action"
+  | "processing"
+  | "canceled"
+  | "sync_pending"
+  | "saved"
+  | "checkout_ready"
+  | "prepare_unknown";
+
+export interface SavedCardSummary {
+  brand: string;
+  last4: string;
+}
+
+export interface SavedCardStatus {
+  state: SavedCardState;
+  setup_status?: string | null;
+  payment_method_id?: string | null;
+  card?: SavedCardSummary | null;
+  message?: string | null;
+}
+
+export interface SavedCardPreparation {
+  state: string;
+  setup_intent_id: string;
+  client_secret: string;
+  publishable_key: string;
+}
+
+export interface SavedCardCheckout {
+  order: Order;
+  payment_method_id: string;
+  card?: SavedCardSummary | null;
+}
+
 const jsonHeaders = { "Content-Type": "application/json" };
 
 async function readError(res: Response): Promise<string> {
@@ -218,6 +256,25 @@ export interface ProtocolPayResult {
   intent_status?: string | null;
   charge_id?: string | null;
   payment_method_id?: string | null;
+  stage?: "setup" | "sync" | "checkout" | "payment";
+  order?: Order;
+  next_action?: { type?: string } | null;
+}
+
+export interface BindAndPayProtocolInput {
+  card: TeamCardPayload;
+  billing: BillingInput;
+  expected_amount: string;
+  expected_currency: string;
+}
+
+export interface BindAndPayProtocolResult extends ProtocolPayResult {
+  stage: "setup" | "sync" | "checkout" | "payment";
+  upstream_message?: string;
+  upstream_status?: number;
+  upstream_code?: string;
+  remediation?: string;
+  documentation_url?: string;
 }
 
 export interface ProtocolPayInput {
@@ -254,6 +311,22 @@ export async function payProtocol(orderId: string, input: ProtocolPayInput): Pro
 
 const ZERO_DECIMAL = new Set(["BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW", "MGA", "PYG", "RWF", "UGX", "VND", "VUV", "XAF", "XOF", "XPF"]);
 
+export async function bindAndPayProtocol(orderId: string, input: BindAndPayProtocolInput): Promise<BindAndPayProtocolResult> {
+  const res = await fetchWithDeadline(`/api/orders/${encodeURIComponent(orderId)}/bind-and-pay-protocol`, {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify(input),
+  }, 300000, "协议支付结果待核实，请使用查询协议状态，暂勿重复提交");
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()) as BindAndPayProtocolResult;
+}
+
+export async function getBindAndPayProtocol(orderId: string): Promise<BindAndPayProtocolResult> {
+  const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/bind-and-pay-protocol`);
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()) as BindAndPayProtocolResult;
+}
+
 export function formatAmount(amount?: string | null, currency?: string | null): string | null {
   if (amount == null || amount === "") return null;
   const value = Number(amount);
@@ -272,6 +345,24 @@ export function formatAmount(amount?: string | null, currency?: string | null): 
     }
   }
   return code ? `${amount} ${code}` : amount;
+}
+
+export async function preparePlusSavedCard(orderId: string): Promise<SavedCardPreparation> {
+  const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/saved-card/prepare`, { method: "POST" });
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()) as SavedCardPreparation;
+}
+
+export async function getPlusSavedCard(orderId: string, signal?: AbortSignal): Promise<SavedCardStatus> {
+  const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/saved-card`, { signal });
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()) as SavedCardStatus;
+}
+
+export async function refreshPlusSavedCardCheckout(orderId: string): Promise<SavedCardCheckout> {
+  const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/saved-card/refresh-checkout`, { method: "POST" });
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()) as SavedCardCheckout;
 }
 
 export async function getOrder(orderId: string): Promise<Order> {

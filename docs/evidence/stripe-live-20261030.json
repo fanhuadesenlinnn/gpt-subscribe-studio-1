@@ -1,0 +1,190 @@
+{
+ "captured_at": "2026-10-30T11:5xZ (server-side run through gss API)",
+ "live_merchant": {
+  "publishable_key_prefix": "pk_live_<redacted>",
+  "checkout": "oaics_...",
+  "amount": 3000,
+  "currency": "JPY"
+ },
+ "responses": {
+  "elements_sessions": {
+   "status": 200,
+   "bytes": 29465,
+   "session_id": "elements_session_1CRegdEQVNg",
+   "config_id": "418d6dd5-4a30-4872-8b16-745a9718caf1",
+   "customer": "<id:cus>",
+   "passive_captcha": {
+    "captcha_provider_payload": null,
+    "pm_create_hcaptcha_payment_method_types": [
+     "apple_pay",
+     "google_pay",
+     "card_wallet_link"
+    ],
+    "rqdata": null,
+    "site_key": "463b917e-e264-403f-ad34-34af0ee10294",
+    "token_timeout_seconds": 1770
+   },
+   "payment_method_preference": {
+    "object": "payment_method_preference",
+    "country_code": "JP",
+    "ordered_payment_method_types": [
+     "card"
+    ],
+    "type": "deferred_intent"
+   }
+  },
+  "consumers_sessions_lookup": {
+   "account_id": null,
+   "auth_session_client_secret": null,
+   "available_partner_accounts": [],
+   "avatar": null,
+   "consumer_session": null,
+   "error_message": "No consumer found for the given email address.",
+   "exists": false,
+   "experiments": [],
+   "link_auth_intent": null,
+   "link_brand": "link",
+   "onboarded_to_balance": null,
+   "publishable_key": null,
+   "sms_outage_message": null,
+   "suggested_email": "fixture@example.test"
+  },
+  "card_metadata": {
+   "data": [
+    {
+     "account_range_high": "<pan>",
+     "account_range_low": "<pan>",
+     "brand": "VISA",
+     "country": "GB",
+     "funding": "CREDIT",
+     "pan_length": 16,
+     "prepaid_reloadable": "",
+     "program_type": "",
+     "segment_type": "CONSUMER"
+    }
+   ]
+  },
+  "taxes_total": {
+   "minorUnitsAmount": 3000,
+   "amount": "¥3,000"
+  },
+  "confirmation_tokens_test_card": {
+   "status": 400,
+   "body": {
+    "error": {
+     "code": "card_declined",
+     "decline_code": "live_mode_test_card",
+     "doc_url": "https://stripe.com/docs/error-codes/card-declined",
+     "message": "Your card was declined. Your request was in live mode, but used a known test card.",
+     "param": "",
+     "request_log_url": "https://dashboard.stripe.com/acct_1HOrSwC6h1nxGoI3/workbench/logs?object=req_aGUS4oAMsNqHGh",
+     "type": "card_error"
+    }
+   }
+  },
+  "m_stripe_6": {
+   "status": 200,
+   "body": {
+    "muid": "3f877bf3-a761-448e-b592-173e3f3dad38328302",
+    "guid": "c6f097ca-40cd-49a7-9a2f-a564e29a1a2b992f1b",
+    "sid": "bf0ff2c6-0675-43ec-9529-c925ba5369bb34628f"
+   }
+  }
+ },
+ "sdk_gate_probe": {
+  "note": "replaying the same confirmation_tokens request without payment_user_agent/referrer/time_on_page/pasted_fields",
+  "status": 400,
+  "error": {
+   "message": "This publishable key tokenization request is required to use the Stripe SDK."
+  }
+ },
+ "real_card_run": {
+  "note": "local card inventory runtime/cards/parsed.json (95 cards, 31 US full billing)",
+  "attempts": [
+   {
+    "card_bin": "460223",
+    "type": "Visa Prepaid",
+    "ctoken": "200",
+    "chatgpt_confirm": "200",
+    "intent_confirm": "402",
+    "code": "card_declined",
+    "decline_code": "generic_decline"
+   },
+   {
+    "card_bin": "460223",
+    "type": "Visa Prepaid",
+    "ctoken": "200",
+    "chatgpt_confirm": "200",
+    "intent_confirm": "402",
+    "code": "card_declined",
+    "decline_code": "generic_decline"
+   },
+   {
+    "card_bin": "527515",
+    "type": "Mastercard Debit",
+    "ctoken": "200",
+    "chatgpt_confirm": "200",
+    "intent_confirm": "402",
+    "code": "card_declined",
+    "decline_code": "fraudulent"
+   },
+   {
+    "card_bin": "411774",
+    "type": "Visa Credit",
+    "ctoken": "200",
+    "chatgpt_confirm": "200",
+    "intent_confirm": "402",
+    "code": "card_declined",
+    "decline_code": "fraudulent"
+   }
+  ],
+  "chatgpt_confirm_body": {
+   "status": "success",
+   "type": "payment_intent",
+   "client_secret": "pi_…_secret_…",
+   "confirm_return_url": "https://chatgpt.com/checkout/verify?stripe_session_id=oaics_…&processor_entity=openai_llc&plan_type=plus&source=chatgpt_web_merged"
+  },
+  "intent_confirm_error": {
+   "code": "card_declined",
+   "decline_code": "generic_decline",
+   "type": "card_error",
+   "has_payment_intent": true,
+   "amount": 2918,
+   "currency": "jpy",
+   "status": "requires_payment_method",
+   "charge": "ch_…"
+  },
+  "checkout_after_decline": {
+   "status": "open",
+   "payment_status": "unpaid"
+  },
+  "note_on_radar": "没有 passive hCaptcha token 时两个不同 BIN 都被判 fraudulent；HAR 的请求里带 radar_options[hcaptcha_token]"
+ },
+ "solver_runs": {
+  "solver": "tools/hcaptcha-solver (puppeteer-core + Chrome 156.0.8078.76), ORIGIN_MODE=loopback",
+  "token_len": [
+   3884,
+   3900,
+   3911
+  ],
+  "ctoken_radar_field": "payment_method_data[radar_options][hcaptcha_token]",
+  "telemetry_events_with_token": 2,
+  "outcomes_with_token": [
+   {
+    "bin": "460223",
+    "type": "Visa Prepaid",
+    "decline_code": "generic_decline"
+   },
+   {
+    "bin": "411774",
+    "type": "Visa Credit",
+    "decline_code": "fraudulent"
+   },
+   {
+    "bin": "411774",
+    "type": "Visa Credit",
+    "decline_code": "fraudulent"
+   }
+  ]
+ }
+}

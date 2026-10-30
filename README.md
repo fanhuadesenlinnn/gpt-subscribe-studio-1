@@ -114,15 +114,24 @@ Plus 家族的会话 id 有两种形态，两种都支持：
 
 ### Plus 的协议链路
 
+默认按 2026-10-29 HAR 逐请求复刻（`GSS_PLUS_ENGINE=har`，详见
+[docs/plus-har-protocol.md](docs/plus-har-protocol.md)）：
+
 ```
-① mint_sentinel                    挂 openai-sentinel-token / -so-token
-② POST /v1/payment_methods         卡号 → pm_（带 allow_redisplay=always）
-③ POST /v1/confirmation_tokens     pm_  → ctoken_
-④ POST /backend-api/payments/checkout/confirm
-④b finalize_stripe_custom_checkout 仅 cs_ 会话，取 PaymentIntent
-⑤ POST /v1/payment_intents/{id}/confirm
-⑥ 判定：拒卡 / 成功 / 需 3DS / 命中 hCaptcha
+① CES 遥测 + mint_sentinel        挂 openai-sentinel-token / -so-token，/sentinel/ping
+② GET  /backend-api/payments/checkout/{processor}/{id}
+③ GET  /v1/elements/sessions      Elements 启动（税费前金额）
+④ m.stripe.com/6 ×4 + r.stripe.com/b  设备指纹 + SDK 事件流（设备按账号持久化）
+⑤ POST /v1/consumers/sessions/lookup ×2 + GET /edge-internal/card-metadata
+⑥ POST /backend-api/payments/checkout/taxes + update_tax_id
+⑦ GET  /v1/elements/sessions      税费后金额
+⑧ POST /v1/confirmation_tokens    卡内联 + radar token + guid/muid/sid
+⑨ POST /backend-api/payments/checkout/confirm（四字段）
+⑩ POST /v1/payment_intents/{id}/confirm（同一 ctoken + return_url）
+⑪ GET 原结账 → complete/paid → POST /checkout_session → GET /subscriptions
 ```
+
+旧链路（`/v1/payment_methods` 造 `pm_`）保留在 `GSS_PLUS_ENGINE=legacy`。
 
 ### 两种提交方式（界面可切换，默认协议）
 
@@ -130,7 +139,7 @@ Plus / Pro 家族的界面上有「协议提交」与「Stripe 输入框」两�
 
 | 方式 | 卡号经过 | 取 pm_ 的方式 | 适用 |
 |---|---|---|---|
-| **协议提交**（默认） | 本服务 → Stripe API | 服务端 `POST /v1/payment_methods` | 批量、无人值守 |
+| **协议提交**（默认） | 本服务 → Stripe API | 服务端直传 `confirmation_tokens`（HAR 复刻） | 批量、无人值守 |
 | **Stripe 输入框** | 只在浏览器 → Stripe iframe | 浏览器 Stripe.js 产出 `pm_` | 指纹与 Radar 信号最接近真人 |
 
 两种方式在 `pm_` 之后的服务端链路完全相同：
@@ -338,8 +347,18 @@ pnpm --dir apps/web dev
 | `GSS_USE_FAKE` | 离线 Fake 模式（不发真实请求） |
 | `GSS_ENABLE_PROMO` | 是否开放 promo 计费模式，默认关闭 |
 | `GSS_CAPTCHA_API_KEY` | 打码服务密钥；纯协议路径不使用，留空即可 |
+| `GSS_PLUS_ENGINE` | `har`（默认，2026-10-29 HAR 逐请求复刻）/ `legacy`（旧 pm_ 链路） |
+| `GSS_HAR_TELEMETRY` | `full`（默认，m.stripe.com/6 + r.stripe.com/b + js.stripe.com/m.stripe.network 资源 + CES）/ `off` |
+| `GSS_HAR_TELEMETRY_BUDGET` | 遥测时间预算（秒），默认 `120`；超时后丢弃剩余事件，不阻塞支付 |
+| `GSS_HAR_CAPTURE` | 抓包落盘路径（JSONL），留空不抓 |
+| `GSS_DEVICE_OS` | 设备系统，留空跟随本机（`sys.platform`）；可强制 `linux` / `macos` / `windows` |
+| `GSS_DEVICE_FINGERPRINT` | 本机指纹 JSON（`scripts/fingerprint_probe.js` 产出），canvas/audio/cores/时区取自真机 |
+| `GSS_DEVICE_STORE` | 按账号持久化的设备库，默认 `$GSS_DATA_DIR/device_store.json` |
+| `GSS_SOLVER_PROXY` | 求解器专用出口（HTTP 桥），留空则用订单代理 |
+| `GSS_PROXY_SID` | 钉住某个 sticky 会话（调试 / 让求解器与支付同 IP） |
+| `GSS_LLM_SOLVER_URL` | hCaptcha passive 求解器地址，产出 `P1_…` radar token |
 
-`STRIPE_PUBLISHABLE_KEY` 可覆盖代码里的默认值。
+`STRIPE_PUBLISHABLE_KEY` 只给旧引擎（`GSS_PLUS_ENGINE=legacy`）用；HAR 引擎从结账页里读 publishable key，代码里不再存任何 key。
 
 ### 账单地址与邮箱
 

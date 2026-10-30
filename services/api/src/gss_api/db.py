@@ -23,7 +23,6 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     create_engine,
-    func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 

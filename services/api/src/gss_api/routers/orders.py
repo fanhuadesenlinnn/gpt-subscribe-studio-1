@@ -30,6 +30,7 @@ from gss_core.config import load_settings, use_fake_adapters
 from gss_core.countries import is_supported, normalize_country
 from gss_core.hosted import TeamHostedClient
 from gss_core.plus_protocol import PlusProtocol
+from gss_core.plus_har_protocol import PlusHarProtocol
 from gss_core.stripe_protocol import StripeProtocol, PaymentOutcome
 from gss_core.proxies import align_proxy_region, configured_proxy, session_proxy
 from gss_core.redaction import redact_sensitive
@@ -40,6 +41,7 @@ from gss_core.session_token import (
     parse_session_bundle,
 )
 from gss_core.vault import OrderSecrets, vault
+from gss_core.saved_cards import verification_session
 from gss_orchestrator.pipeline import apply_payment_result, assert_deliverable
 from gss_payment.adapter import hosted_payment_result
 
@@ -62,6 +64,25 @@ from .events import notify_order_update
 router = APIRouter(prefix="/api", tags=["orders"])
 logger = logging.getLogger("gss.orders")
 _team_locks: dict[str, asyncio.Lock] = {}
+
+
+def _assert_saved_card_resolved(secrets: OrderSecrets) -> None:
+    context = secrets.saved_card_context
+    if context and context.get("protocol_flow"):
+        raise HTTPException(409, "本订单已进入协议绑卡支付，请使用协议状态查询")
+    if context and context.get("state") not in {"saved", "checkout_ready", "canceled"}:
+        raise HTTPException(409, "请先完成保存卡片的验证与账号同步，再提交付款")
+
+
+def _verify_saved_checkout(pipeline, secrets: OrderSecrets):
+    client = ChatGPTClient.from_raw_session(secrets.session, proxy=secrets.proxy or None)
+    client.timeout = 30.0
+    try:
+        session = verification_session(client, secrets.saved_card_context["account_id"])
+    finally:
+        client.close()
+    # The upstream account adapter uses blocking HTTP; keep the entire lookup off the API loop.
+    return session, asyncio.run(pipeline.verify(session=session))
 
 
 def _to_mode(mode_in: ModeIn) -> Mode:
@@ -509,7 +530,7 @@ async def prepare_team(order_id: str, payload: TeamPrepareRequest) -> dict:
 
 async def _solve_challenge(order_id: str, secrets, view):
     """Solve the stored intent challenge and return the refreshed payment result."""
-    from gss_core.captcha import challenge_from_intent, solve_hcaptcha, verify_challenge
+    from gss_core.captcha import solve_hcaptcha, verify_challenge
     from gss_core.config import load_settings
     from gss_payment.adapter import hosted_payment_result as _hosted_result
     settings = load_settings()
@@ -632,6 +653,7 @@ async def _pay_order(order_id: str, payload: OrderPayRequest) -> OrderOut:
     secrets = vault.get(order_id)
     if secrets is None:
         raise _error(status.HTTP_401_UNAUTHORIZED, ErrorCode.SESSION_EXPIRED, "session 已过期，请重新提交")
+    _assert_saved_card_resolved(secrets)
 
     if order.plan is Plan.TEAM and not use_fake_adapters():
         context = secrets.team_context
@@ -676,7 +698,7 @@ async def _pay_order(order_id: str, payload: OrderPayRequest) -> OrderOut:
     if payload.billing is not None:
         custom = {k: v.strip() for k, v in payload.billing.model_dump().items()}
         custom["country"] = custom["country"].upper()
-        # Team 的 order.billing_country 是创建结账的地区（决定币种）；
+        # order.billing_country 是创建结账的地区（决定币种）；
         # custom.country 是支付账单国家，独立用于 PaymentMethod 和 Stripe tax_region。
         if order.plan is Plan.TEAM:
             if not is_supported(custom["country"]):
@@ -685,12 +707,6 @@ async def _pay_order(order_id: str, payload: OrderPayRequest) -> OrderOut:
                     ErrorCode.BILLING_COUNTRY_MISMATCH,
                     f"不支持的账单国家: {custom['country']}",
                 )
-        elif custom["country"] != order.billing_country:
-            raise _error(
-                status.HTTP_400_BAD_REQUEST,
-                ErrorCode.BILLING_COUNTRY_MISMATCH,
-                f"账单地址国家 {custom['country']} 与订单地区 {order.billing_country} 不一致",
-            )
         secrets.billing = custom
         vault.put(order_id, secrets)
 
@@ -767,13 +783,54 @@ async def verify_order(order_id: str, paid: bool = False) -> OrderOut:
     order = store.get_order(order_id)
     if order is None:
         raise _error(status.HTTP_404_NOT_FOUND, ErrorCode.COMPLIANCE_BLOCKED, "订单不存在")
+    if order.status in {OrderStatus.ACTIVE, OrderStatus.DELIVERED}:
+        return _to_out(order)
     if order.plan is Plan.TEAM and not use_fake_adapters():
         return await poll_team(order_id)
+    async with _team_locks.setdefault(order_id, asyncio.Lock()):
+        return await _verify_order(order_id, paid=paid)
+
+
+async def _verify_order(order_id: str, paid: bool = False) -> OrderOut:
+    order = store.get_order(order_id)
+    if order is None:
+        raise _error(404, ErrorCode.COMPLIANCE_BLOCKED, "订单不存在")
+    if order.status in {OrderStatus.ACTIVE, OrderStatus.DELIVERED}:
+        return _to_out(order)
     secrets = vault.get(order_id)
     if secrets is None:
         raise _error(status.HTTP_401_UNAUTHORIZED, ErrorCode.SESSION_EXPIRED, "session 已过期，请重新提交")
     view = store.view(order_id)
     pipeline = build_pipeline()
+    if secrets.saved_card_context:
+        if secrets.saved_card_context.get("protocol_flow"):
+            raise HTTPException(409, "本订单已进入协议绑卡支付，请使用协议状态查询")
+        if secrets.saved_card_context.get("state") != "checkout_ready":
+            raise HTTPException(409, "请先完成保存卡片并刷新结账链接，再查询订阅")
+        # A status query before payment must leave this checkout available.
+        try:
+            refreshed_session, info = await asyncio.to_thread(_verify_saved_checkout, pipeline, secrets)
+            secrets.session = refreshed_session
+        except DomainError as exc:
+            if exc.code in {ErrorCode.INVALID_SESSION, ErrorCode.SESSION_EXPIRED, ErrorCode.CHECKOUT_UPSTREAM_ERROR}:
+                raise _from_domain(exc)
+            view.last_error = "订阅状态暂未读到，请稍后重新查询"
+            return _to_out(order)
+        view.subscription = info
+        if info.active:
+            if order.status in {OrderStatus.AWAITING_PAYMENT, OrderStatus.REQUIRES_ACTION, OrderStatus.UNKNOWN}:
+                store.update_status(order_id, OrderStatus.PAYING)
+            if order.status is OrderStatus.PAYING:
+                store.update_status(order_id, OrderStatus.VERIFYING)
+            store.update_status(order_id, OrderStatus.ACTIVE)
+            assert_deliverable(OrderStatus.ACTIVE, info)
+            store.update_status(order_id, OrderStatus.DELIVERED)
+            view.last_error = None
+            vault.drop(order_id)
+            await notify_order_update(order_id, OrderStatus.DELIVERED, {"subscription_active": True})
+        else:
+            view.last_error = "订阅尚未生效，请在新结账页面完成付款后重新查询"
+        return _to_out(order)
     current = store.get_order(order_id)
     if current is not None and current.status in {OrderStatus.AWAITING_PAYMENT, OrderStatus.REQUIRES_ACTION, OrderStatus.UNKNOWN}:
         # 3DS 验证完成（或不确定态复查）后从这里继续往 verifying 推进。
@@ -883,6 +940,11 @@ class ProtocolPayOut(BaseModel):
                409: {"model": ErrorOut}, 502: {"model": ErrorOut}},
 )
 async def pay_order_protocol(order_id: str, payload: ProtocolPayRequest) -> ProtocolPayOut:
+    async with _team_locks.setdefault(order_id, asyncio.Lock()):
+        return await _pay_order_protocol(order_id, payload)
+
+
+async def _pay_order_protocol(order_id: str, payload: ProtocolPayRequest) -> ProtocolPayOut:
     """纯 HTTP 协议完成 Stripe Checkout 支付，不需要浏览器。
 
     链路：指纹注册 → init → elements/sessions → 逐字段地址
@@ -891,8 +953,8 @@ async def pay_order_protocol(order_id: str, payload: ProtocolPayRequest) -> Prot
     order = store.get_order(order_id)
     if order is None:
         raise _error(status.HTTP_404_NOT_FOUND, ErrorCode.COMPLIANCE_BLOCKED, "订单不存在")
-    if order.status in {OrderStatus.DELIVERED, OrderStatus.ACTIVE}:
-        raise HTTPException(409, "订单已开通，无需重复支付")
+    if order.status is not OrderStatus.AWAITING_PAYMENT:
+        raise HTTPException(409, "支付已提交，请查询订单状态，不要重复确认")
 
     view = store.view(order_id)
     checkout_url = (getattr(view, "checkout_url", "") or "") if view else ""
@@ -911,7 +973,10 @@ async def pay_order_protocol(order_id: str, payload: ProtocolPayRequest) -> Prot
     )
 
     secrets = vault.get(order_id)
-    session_raw = (secrets.session if secrets else "") or ""
+    if secrets is None:
+        raise _error(401, ErrorCode.SESSION_EXPIRED, "订单凭证已过期，请重新创建结账")
+    _assert_saved_card_resolved(secrets)
+    session_raw = secrets.session or ""
     publishable_key = (
         (payload.publishable_key or "")
         or (getattr(view, "publishable_key", "") or "")
@@ -932,22 +997,44 @@ async def pay_order_protocol(order_id: str, payload: ProtocolPayRequest) -> Prot
     )
 
     def _run() -> PaymentOutcome:
+        har_checkout_id = str(getattr(view, "checkout_session_id", "") or "")
+        if is_custom_checkout and not pm_id and not har_checkout_id.startswith("cs_"):
+            # 协议模式：2026-10-29 HAR 逐请求复刻（指纹 + 遥测，设备每次随机）
+            hp = PlusHarProtocol(
+                session=session_raw, checkout_url=checkout_url,
+                publishable_key=publishable_key, card=card, billing=billing,
+                proxy=proxy, currency=currency,
+                profile=getattr(secrets, "profile", None),
+                customer_session_client_secret=(
+                    getattr(view, "customer_session_client_secret", "") or ""),
+                email=billing.get("email") or "",
+                country=billing.get("country") or "",
+                account_id=secrets.account_id,
+                checkout_id=getattr(view, "checkout_session_id", "") or "",
+                confirm_return_url=getattr(view, "confirm_return_url", "") or "",
+            )
+            try:
+                return hp.pay_from_url()
+            finally:
+                hp.close()
         if is_custom_checkout:
-            # Plus / Go / Pro 家族：custom checkout（oaics_），走 ChatGPT 确认链
+            # 输入框模式：浏览器已换好 pm_，服务端只做确认，不接触卡号
             pp = PlusProtocol(
                 session=session_raw, checkout_url=checkout_url,
                 publishable_key=publishable_key, card=card, billing=billing,
                 proxy=proxy, currency=currency,
                 profile=getattr(secrets, "profile", None),
             )
-            # 浏览器 Stripe 输入框已换好 pm_ 时复用它，服务端不再提交卡号
             pp.external_pm = pm_id
-            # pay_from_url 内含代理轮换重试，结束时自己关闭客户端
-            return pp.pay_from_url()
+            try:
+                return pp.pay_from_url()
+            finally:
+                pp.close()
         sp = StripeProtocol(
             proxy=proxy, captcha_key=captcha_key, captcha_url=captcha_url,
             card=card, billing=billing,
             profile=getattr(secrets, "profile", None),
+            publishable_key=publishable_key,
         )
         # 默认全关（批量模式）；网页上勾选后逐项打开
         sp.step_fingerprint = payload.steps.fingerprint

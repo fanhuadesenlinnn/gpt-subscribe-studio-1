@@ -1,0 +1,155 @@
+{
+ "error": {
+  "charge": "ch_fixture",
+  "code": "card_declined",
+  "decline_code": "generic_decline",
+  "doc_url": "https://stripe.com/docs/error-codes/card-declined",
+  "message": "Your card was declined.",
+  "payment_intent": {
+   "id": "pi_fixture",
+   "object": "payment_intent",
+   "allowed_payment_method_types": null,
+   "amount": 2918,
+   "amount_details": {
+    "tip": {}
+   },
+   "automatic_payment_methods": null,
+   "canceled_at": null,
+   "cancellation_reason": null,
+   "capture_method": "automatic_async",
+   "client_secret": "pi_fixture_secret_ZPPweAFit7P2Crv39OdCgH0uP",
+   "confirmation_method": "automatic",
+   "created": 1793362739,
+   "currency": "jpy",
+   "description": "Subscription creation",
+   "excluded_payment_method_types": null,
+   "last_payment_error": {
+    "charge": "ch_fixture",
+    "code": "card_declined",
+    "decline_code": "generic_decline",
+    "doc_url": "https://stripe.com/docs/error-codes/card-declined",
+    "message": "Your card was declined.",
+    "payment_method": {
+     "id": "pm_1UWEljC6h1nxGoI3e0GxJdII",
+     "object": "payment_method",
+     "allow_redisplay": "always",
+     "billing_details": {
+      "address": {
+       "city": "Tooele",
+       "country": "US",
+       "line1": "454 W 2030 N",
+       "line2": null,
+       "postal_code": "84074",
+       "state": "UT"
+      },
+      "email": "fixture@example.test",
+      "name": "Daesen Van Gend",
+      "phone": null,
+      "tax_id": null
+     },
+     "card": {
+      "brand": "visa",
+      "checks": {
+       "address_line1_check": null,
+       "address_postal_code_check": null,
+       "cvc_check": null
+      },
+      "country": "US",
+      "display_brand": "visa",
+      "exp_month": 1,
+      "exp_year": 2028,
+      "funding": "debit",
+      "generated_from": null,
+      "last4": "4026",
+      "networks": {
+       "available": [
+        "visa"
+       ],
+       "preferred": null
+      },
+      "regulated_status": "unregulated",
+      "three_d_secure_usage": {
+       "supported": true
+      },
+      "wallet": null
+     },
+     "created": 1793362731,
+     "customer": null,
+     "customer_account": null,
+     "livemode": true,
+     "shared_payment_granted_token": null,
+     "type": "card"
+    },
+    "payment_method_type": "card",
+    "type": "card_error"
+   },
+   "livemode": true,
+   "next_action": null,
+   "payment_method": null,
+   "payment_method_configuration_details": null,
+   "payment_method_types": [
+    "card",
+    "link"
+   ],
+   "processing": null,
+   "receipt_email": null,
+   "setup_future_usage": "off_session",
+   "shipping": null,
+   "source": null,
+   "status": "requires_payment_method"
+  },
+  "payment_method": {
+   "id": "pm_1UWEljC6h1nxGoI3e0GxJdII",
+   "object": "payment_method",
+   "allow_redisplay": "always",
+   "billing_details": {
+    "address": {
+     "city": "Tooele",
+     "country": "US",
+     "line1": "454 W 2030 N",
+     "line2": null,
+     "postal_code": "84074",
+     "state": "UT"
+    },
+    "email": "fixture@example.test",
+    "name": "Daesen Van Gend",
+    "phone": null,
+    "tax_id": null
+   },
+   "card": {
+    "brand": "visa",
+    "checks": {
+     "address_line1_check": null,
+     "address_postal_code_check": null,
+     "cvc_check": null
+    },
+    "country": "US",
+    "display_brand": "visa",
+    "exp_month": 1,
+    "exp_year": 2028,
+    "funding": "debit",
+    "generated_from": null,
+    "last4": "4026",
+    "networks": {
+     "available": [
+      "visa"
+     ],
+     "preferred": null
+    },
+    "regulated_status": "unregulated",
+    "three_d_secure_usage": {
+     "supported": true
+    },
+    "wallet": null
+   },
+   "created": 1793362731,
+   "customer": null,
+   "customer_account": null,
+   "livemode": true,
+   "shared_payment_granted_token": null,
+   "type": "card"
+  },
+  "request_log_url": "https://dashboard.stripe.com/acct_1HOrSwC6h1nxGoI3/workbench/logs?object=req_8tBURzNxSZ7jpn",
+  "type": "card_error"
+ }
+}

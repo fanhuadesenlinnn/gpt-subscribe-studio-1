@@ -29,6 +29,7 @@ class OrderSecrets:
     profile: Optional[Dict[str, Any]] = None
     billing: Dict[str, str] = field(default_factory=dict)
     team_context: Optional[Dict[str, Any]] = None
+    saved_card_context: Optional[Dict[str, Any]] = None
     expires_at: datetime = field(default_factory=lambda: _utcnow() + timedelta(minutes=30))
 
 

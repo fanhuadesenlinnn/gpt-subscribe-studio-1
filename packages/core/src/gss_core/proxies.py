@@ -50,7 +50,7 @@ class Gateway:
     enabled: bool = False
 
     def validate(self):
-        if self.scheme not in {"http", "https", "socks5"}:
+        if self.scheme not in {"http", "https", "socks5", "socks5h"}:
             raise ValueError("代理协议必须是 HTTP、HTTPS 或 SOCKS5")
         if type(self.port) is not int or not 1 <= self.port <= 65535:
             raise ValueError("端口必须是 1 到 65535 的整数")
@@ -192,6 +192,10 @@ def configured_proxy(role: str) -> str | None:
 
 
 def new_proxy_sid() -> str:
+    # GSS_PROXY_SID pins the sticky session (debugging / solver-IP alignment).
+    pinned = os.environ.get("GSS_PROXY_SID", "").strip()
+    if pinned:
+        return pinned
     alphabet = string.ascii_letters + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(8))
 

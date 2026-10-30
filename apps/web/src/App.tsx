@@ -24,7 +24,7 @@ export function App() {
         <div>
           <Title order={2}>gpt-subscribe-studio</Title>
           <Text size="sm" c="dimmed">
-            Plus / Go / Pro 在本页填卡，Team 走托管长链。卡号不经过本站服务器。
+            保留协议模式与 Stripe 输入框模式；订单阶段和支付结果以服务端返回为准。
           </Text>
         </div>
         <Group gap="xs">

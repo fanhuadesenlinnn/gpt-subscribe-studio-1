@@ -231,7 +231,7 @@ def test_pay_uses_manual_billing_address() -> None:
     assert paid.json()["billing"]["country"] == "US"
 
 
-def test_pay_rejects_billing_country_mismatch() -> None:
+def test_pay_accepts_independent_billing_country_without_changing_order_region() -> None:
     store.clear()
     client = TestClient(create_app())
     order_id = _create_us_order(client)
@@ -251,7 +251,11 @@ def test_pay_rejects_billing_country_mismatch() -> None:
         },
     )
 
-    assert resp.status_code == 400, resp.text
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "delivered"
+    assert resp.json()["billing"]["country"] == "JP"
+    assert resp.json()["billing_country"] == "US"
+    assert resp.json()["currency"] == "USD"
 
 
 _JWE = (
@@ -333,3 +337,27 @@ def test_checkout_effective_proxy_is_kept_only_in_memory(monkeypatch):
     assert vault.get(r.json()["id"]).proxy == used
     assert "effective_proxy" not in r.json()
     assert used not in r.text
+
+
+@pytest.mark.parametrize("checkout_country,billing_country,currency", [("EG", "US", "EGP"), ("US", "JP", "USD")])
+def test_plus_input_payment_keeps_checkout_currency_and_independent_billing(monkeypatch, checkout_country, billing_country, currency):
+    from gss_api.runtime import build_pipeline
+    monkeypatch.setenv("GSS_USE_FAKE", "1")
+    pipeline = build_pipeline()
+    monkeypatch.setattr("gss_api.routers.orders.build_pipeline", lambda: pipeline)
+    store.clear()
+    client = TestClient(create_app())
+    created = client.post("/api/orders", json={"plan": "plus", "billing_country": checkout_country, "session": "fixture-session"})
+    assert created.status_code == 201, created.text
+    body = created.json()
+    address = {"name": "Fixture User", "line1": "Fixture Street", "city": "Fixture City", "state": "OR", "postal_code": "97005", "country": billing_country}
+    response = client.post(f"/api/orders/{body['id']}/pay", json={"payment_method_token": "pm_fixture", "billing": address})
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["status"] == "delivered"
+    assert result["billing_country"] == checkout_country
+    assert result["currency"] == currency
+    assert result["billing"]["country"] == billing_country
+    request = pipeline.deps.payment.calls[0]
+    assert request.country == checkout_country
+    assert request.billing["country"] == billing_country

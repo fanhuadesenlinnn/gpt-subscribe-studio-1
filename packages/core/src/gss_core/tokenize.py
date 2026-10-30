@@ -12,7 +12,6 @@ import logging
 import re
 import time
 import uuid
-from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Optional
 
 from gss_contracts.errors import DomainError, ErrorCode

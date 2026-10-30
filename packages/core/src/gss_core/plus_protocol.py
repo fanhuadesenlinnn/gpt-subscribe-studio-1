@@ -357,7 +357,7 @@ class PlusProtocol:
                 "checkout_email": str(b.get("email") or ""),
             }
             self.client.http.post(
-                f"https://chatgpt.com/backend-api/payments/checkout/taxes",
+                "https://chatgpt.com/backend-api/payments/checkout/taxes",
                 json=payload,
                 headers=self.client._route_headers(
                     "/backend-api/payments/checkout/taxes",
@@ -371,7 +371,7 @@ class PlusProtocol:
         """POST /backend-api/payments/checkout/update_tax_id。"""
         try:
             self.client.http.post(
-                f"https://chatgpt.com/backend-api/payments/checkout/update_tax_id",
+                "https://chatgpt.com/backend-api/payments/checkout/update_tax_id",
                 json={"checkout_session_id": self.checkout_id, "tax_id_info": None},
                 headers=self.client._route_headers(
                     "/backend-api/payments/checkout/update_tax_id",

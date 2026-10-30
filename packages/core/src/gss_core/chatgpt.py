@@ -394,6 +394,14 @@ def _checkout_body(
     return body
 
 
+class CheckoutAmountChanged(DomainError):
+    """A quote changed before any checkout confirmation was submitted."""
+    def __init__(self, amount_minor: int, currency: str):
+        super().__init__(ErrorCode.CHECKOUT_UPSTREAM_ERROR, "结账金额已变化，请重新确认")
+        self.amount_minor = amount_minor
+        self.currency = currency
+
+
 @dataclass
 class CheckoutSession:
     checkout_session_id: str
@@ -1214,6 +1222,7 @@ class ChatGPTClient:
         currency: str = "",
         publishable_key: str = "",
         save_choice: Optional[bool] = None,
+        expected_amount_minor: Optional[int] = None,
     ) -> Dict[str, Any]:
         session_id = public_checkout_id(checkout_session_id)
         page_url = checkout_url or f"{APP_BASE}/checkout/{session_id}"
@@ -1227,6 +1236,11 @@ class ChatGPTClient:
             currency=currency,
             strict=not session_id.startswith("cs_"),
         )
+        if expected_amount_minor is not None:
+            if tax_minor is None:
+                raise DomainError(ErrorCode.CHECKOUT_UPSTREAM_ERROR, "未读到最终税费报价，尚未提交确认")
+            if tax_minor != expected_amount_minor:
+                raise CheckoutAmountChanged(tax_minor, currency)
         if session_id.startswith("cs_"):
             return self.confirm_stripe_custom_checkout(
                 checkout_session_id=session_id,
@@ -1237,6 +1251,7 @@ class ChatGPTClient:
                 billing=billing,
                 currency=currency,
                 save_choice=save_choice,
+                strict_expected_amount=expected_amount_minor is not None,
             )
         confirm_body: Dict[str, Any] = {
             "checkout_session_id": session_id,
@@ -1270,7 +1285,7 @@ class ChatGPTClient:
             text = str(getattr(resp, "text", "") or "").lower()
             return "save_choice" in text or "save choice" in text
 
-        if _needs_save_choice(response):
+        if _needs_save_choice(response) and save_choice is None:
             for choice in (True, False):
                 logger.info(
                     "checkout_confirm 要求保存选择，save_payment_method_for_reuse=%s 重试", choice
@@ -1314,6 +1329,7 @@ class ChatGPTClient:
         billing: Optional[Dict[str, str]] = None,
         currency: str = "",
         save_choice: Optional[bool] = None,
+        strict_expected_amount: bool = False,
     ) -> Dict[str, Any]:
         """cs_live：文档 4.2 Hosted/Custom Checkout（init → tax_region → elements → confirm）。
 
@@ -1350,6 +1366,13 @@ class ChatGPTClient:
             stripe_js_id=stripe_js_id,
             locale=locale,
         )
+        if strict_expected_amount:
+            actual_minor = expected_amount_minor(tax_payload)
+            _, actual_currency = quote_from_payload(tax_payload, currency)
+            if actual_minor is None or (actual_currency and actual_currency.upper() != currency.upper()):
+                raise DomainError(ErrorCode.CHECKOUT_UPSTREAM_ERROR, "最终 Stripe 报价未核实，尚未提交确认")
+            if actual_minor != expected_amount:
+                raise CheckoutAmountChanged(actual_minor, currency)
         minor = expected_amount
         if minor is None:
             minor = expected_amount_minor(tax_payload) or expected_amount_minor(init_payload)
@@ -1995,6 +2018,18 @@ def expected_amount_minor(payload: Any) -> Optional[int]:
     """
     if not isinstance(payload, dict):
         return None
+    # Current custom checkout puts the payable total in checkout_state.total.total.
+    for wrapper in (payload, payload.get("checkout_session"), payload.get("session")):
+        if not isinstance(wrapper, dict):
+            continue
+        state = wrapper.get("checkout_state")
+        if isinstance(state, dict) and isinstance(state.get("total"), dict):
+            total = state["total"]
+            bucket = total.get("total") if isinstance(total.get("total"), dict) else total
+            if bucket.get("minorUnitsAmount") is not None:
+                found = _as_minor_int(bucket["minorUnitsAmount"])
+                if found is not None:
+                    return found
     snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else None
     if snapshot:
         found = _as_minor_int(snapshot.get("amount_total") or snapshot.get("due"))
