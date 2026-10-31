@@ -532,7 +532,7 @@ input[placeholder*="Postal" i]
 表单状态（全部就位）：
 ```
 <pan>   VISA
-02 / 29    135
+<exp> / <cvc>
 FIXTURE HOLDER
 United States  1 Fixture St
 Tax $0.00   Total due today $50.00
