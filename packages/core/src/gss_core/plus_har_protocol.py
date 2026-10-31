@@ -175,6 +175,8 @@ class PlusHarProtocol:
         self.telemetry: Optional[StripeTelemetry] = None
         self.t0 = time.time()
         self.amount_minor = 0
+        # 用户在页面上确认过的金额（order 金额）；税后高于它就要停下来重新确认。
+        self.expected_amount_minor = 0
         self.customer_id = ""
         self.elements_session_id = ""
         self.passive_captcha: Dict[str, str] = {}
@@ -950,6 +952,9 @@ class PlusHarProtocol:
 
         self._taxes()
         self._flush(PHASE_TAXES)
+        stopped = self._quote_guard()
+        if stopped is not None:
+            return stopped
         if self.telemetry is not None:
             # Events captured after the tax step carry the taxed amount.
             self.telemetry.ctx.amount = self.amount_minor
@@ -974,6 +979,24 @@ class PlusHarProtocol:
                     out.state, out.intent_status, out.decline_code)
         if self.mode != "off" and self.telemetry is not None:
             self.telemetry.beat(2)
+        return out
+
+    def _quote_guard(self) -> Optional[PaymentOutcome]:
+        """税后金额高于用户确认值时暂停，等前端确认新报价再付。
+
+        HAR 里这是 UI 自动刷新金额后由人再点一次；纯协议没有这一步，所以这里
+        主动返回 pending/checkout，前端已经有 `quoteChanged` 分支接这个状态。
+        税后更低（优惠/免税）直接放行，按实际应付额收款。
+        """
+        if not self.expected_amount_minor or self.amount_minor <= self.expected_amount_minor:
+            return None
+        self.stage = "checkout"
+        out = PaymentOutcome()
+        out.state = "pending"
+        out.message = "账单税费已更新，请确认当前应付金额后再提交付款"
+        out.raw = self.raw
+        logger.info("plus_har_quote_changed expected=%s actual=%s",
+                    self.expected_amount_minor, self.amount_minor)
         return out
 
     def _read_only_settle(self) -> PaymentOutcome:
@@ -1115,6 +1138,7 @@ def run_har_context(
         engine.ctoken = str(context["confirmation_token"])
     if context.get("amount_minor"):
         engine.amount_minor = int(context["amount_minor"])
+        engine.expected_amount_minor = engine.amount_minor
     try:
         result = engine.pay()
     except DomainError as exc:

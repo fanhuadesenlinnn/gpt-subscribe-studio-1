@@ -296,6 +296,18 @@ ctoken 的 `guid/muid/sid` 与 `m.stripe.com/6` 返回完全一致，`config_id`
 - [stripe-live-20261030.json](./evidence/stripe-live-20261030.json)：本次抓到的真实响应（已脱敏）
 - [tests/fixtures/elements_session_live.json](../tests/fixtures/elements_session_live.json)：完整的 live `elements/sessions` body，供单测解析
 
+## 8b. 金额守卫（与前端对齐）
+
+税后金额高于用户确认值时，引擎在 `_taxes()` 之后、发 ctoken 之前停下，返回：
+
+```json
+{"state": "pending", "stage": "checkout", "message": "账单税费已更新，请确认当前应付金额后再提交付款"}
+```
+
+同时 `context["amount"]` 回写成税后金额（`protocol_cards.py` 写入 `order.amount` / `view.amount`），
+前端 `quoteChanged` 分支据此弹二次确认；确认后第二次 POST 的 `expected_amount` 等于新金额，
+校验通过才继续。税后更低（优惠、免税）直接放行。
+
 ## 9. 未覆盖
 
 - 3DS：`requires_action` 仍归 `challenge_required`，纯协议不做验证页。

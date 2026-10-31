@@ -428,3 +428,30 @@ def test_settle_flags_amount_mismatch():
     result = engine._settle()
     assert result.state == "unknown"
     assert "不一致" in (result.message or "")
+
+
+def test_quote_guard_pauses_when_tax_raises_total():
+    h = build_harness()
+    h.expected_amount_minor = 2178
+    h.amount_minor = 2300
+    out = h._quote_guard()
+    assert out is not None
+    assert out.state == "pending"
+    assert h.stage == "checkout"
+    assert "税费" in (out.message or "")
+
+
+def test_quote_guard_allows_equal_or_lower_total():
+    h = build_harness()
+    h.expected_amount_minor = 3000
+    h.amount_minor = 2891
+    assert h._quote_guard() is None
+    h.amount_minor = 3000
+    assert h._quote_guard() is None
+
+
+def test_quote_guard_skipped_without_expected():
+    h = build_harness()
+    h.expected_amount_minor = 0
+    h.amount_minor = 9999
+    assert h._quote_guard() is None
